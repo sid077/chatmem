@@ -1,18 +1,66 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
+
+	chatmcp "github.com/siddhantdubey/chatmem/internal/mcp"
+	chatpg "github.com/siddhantdubey/chatmem/internal/pg"
+	"github.com/siddhantdubey/chatmem/internal/store"
 )
 
 func newMCPCmd() *cobra.Command {
-	return &cobra.Command{
+	var port uint32
+	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Stdio MCP shim that proxies to the local daemon",
+		Short: "Serve stdio MCP (self-contained: starts and manages embedded Postgres for this process)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("mcp: not implemented yet")
-			return nil
+			return runMCP(cmd.Context(), port)
 		},
 	}
+	cmd.Flags().Uint32Var(&port, "port", defaultPort, "postgres listen port")
+	return cmd
+}
+
+func runMCP(ctx context.Context, port uint32) error {
+	// MCP protocol uses stdout — log to stderr.
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	dataDir := filepath.Join(dataHome(), "pgdata")
+	runtimeDir := filepath.Join(cacheHome(), "pg-runtime")
+	log.Info("chatmem mcp starting", "dataDir", dataDir, "port", port)
+
+	pg := chatpg.New(chatpg.Config{
+		DataDir:    dataDir,
+		RuntimeDir: runtimeDir,
+		Port:       port,
+	})
+	if err := pg.Start(ctx); err != nil {
+		return fmt.Errorf("start postgres: %w", err)
+	}
+	defer func() {
+		if err := pg.Stop(); err != nil {
+			log.Error("stop postgres", "err", err)
+		}
+	}()
+
+	st := store.New(pg.Pool())
+	if err := st.EnsureSchema(ctx); err != nil {
+		return fmt.Errorf("schema: %w", err)
+	}
+	log.Info("mcp ready — serving stdio")
+
+	server := chatmcp.NewServer(st, version)
+
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return server.Run(ctx, &sdk.StdioTransport{})
 }
