@@ -18,6 +18,7 @@ func NewServer(st *store.Store, version string) *sdk.Server {
 	}, nil)
 	registerRecordMessage(s, st)
 	registerGetConversation(s, st)
+	registerSearchHistory(s, st)
 	return s
 }
 
@@ -101,6 +102,88 @@ type getConversationOut struct {
 	Conversation conversationDTO `json:"conversation"`
 	Messages     []messageDTO    `json:"messages"`
 	NextAfter    *string         `json:"next_after,omitempty"`
+}
+
+type searchHistoryArgs struct {
+	Query           string   `json:"query" jsonschema:"free-text query"`
+	TopK            int      `json:"top_k,omitempty" jsonschema:"max hits (default 10, max 100)"`
+	TokenBudget     int      `json:"token_budget,omitempty" jsonschema:"total snippet tokens to return (default 4000)"`
+	Model           string   `json:"model,omitempty" jsonschema:"filter by model id"`
+	ClientID        string   `json:"client_id,omitempty" jsonschema:"filter by client id (e.g. claude-code, cursor)"`
+	Since           string   `json:"since,omitempty" jsonschema:"RFC3339 lower bound on message creation time"`
+	Until           string   `json:"until,omitempty" jsonschema:"RFC3339 upper bound on message creation time"`
+	ConversationIDs []string `json:"conversation_ids,omitempty" jsonschema:"restrict to these conversation UUIDs"`
+}
+
+type searchHit struct {
+	MessageID      string    `json:"message_id"`
+	ConversationID string    `json:"conversation_id"`
+	Role           string    `json:"role"`
+	Snippet        string    `json:"snippet"`
+	Score          float64   `json:"score"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type searchHistoryOut struct {
+	Hits []searchHit `json:"hits"`
+}
+
+func registerSearchHistory(s *sdk.Server, st *store.Store) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "search_history",
+		Description: "Search stored chat history for messages relevant to a query. Returns snippets packed to a token budget, one per conversation. MVP uses Postgres full-text ranking; semantic re-ranking via embeddings ships next.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args searchHistoryArgs) (*sdk.CallToolResult, searchHistoryOut, error) {
+		in := store.SearchHistoryIn{
+			Query:       args.Query,
+			TopK:        args.TopK,
+			TokenBudget: args.TokenBudget,
+			Model:       args.Model,
+			ClientID:    args.ClientID,
+		}
+		if args.Since != "" {
+			t, err := time.Parse(time.RFC3339Nano, args.Since)
+			if err != nil {
+				return nil, searchHistoryOut{}, fmt.Errorf("invalid since: %w", err)
+			}
+			in.Since = &t
+		}
+		if args.Until != "" {
+			t, err := time.Parse(time.RFC3339Nano, args.Until)
+			if err != nil {
+				return nil, searchHistoryOut{}, fmt.Errorf("invalid until: %w", err)
+			}
+			in.Until = &t
+		}
+		for _, s := range args.ConversationIDs {
+			id, err := uuid.Parse(s)
+			if err != nil {
+				return nil, searchHistoryOut{}, fmt.Errorf("invalid conversation id %q: %w", s, err)
+			}
+			in.ConversationIDs = append(in.ConversationIDs, id)
+		}
+
+		res, err := st.SearchHistory(ctx, in)
+		if err != nil {
+			return nil, searchHistoryOut{}, err
+		}
+
+		out := searchHistoryOut{Hits: make([]searchHit, 0, len(res.Hits))}
+		for _, h := range res.Hits {
+			out.Hits = append(out.Hits, searchHit{
+				MessageID:      h.MessageID.String(),
+				ConversationID: h.ConversationID.String(),
+				Role:           h.Role,
+				Snippet:        h.Snippet,
+				Score:          h.Score,
+				CreatedAt:      h.CreatedAt,
+			})
+		}
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{
+				Text: fmt.Sprintf("%d hit(s) for %q", len(out.Hits), args.Query),
+			}},
+		}, out, nil
+	})
 }
 
 func registerGetConversation(s *sdk.Server, st *store.Store) {

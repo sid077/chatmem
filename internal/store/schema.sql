@@ -42,6 +42,9 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
     ON chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
+CREATE INDEX IF NOT EXISTS chunks_tsv_idx
+    ON chunks USING gin (to_tsvector('english', content));
+
 CREATE TABLE IF NOT EXISTS events (
     seq         BIGSERIAL PRIMARY KEY,
     entity_type TEXT NOT NULL,

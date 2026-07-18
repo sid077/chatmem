@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,4 +77,38 @@ func TestStoreRoundTrip(t *testing.T) {
 	if got.NextAfter != nil {
 		t.Fatalf("expected no NextAfter, got %v", got.NextAfter)
 	}
+
+	// Add a second conversation and search across both.
+	if _, err := s.RecordMessage(ctx, store.RecordMessageIn{
+		Role:     "user",
+		Content:  "how does the kafka retention config work",
+		Model:    "gpt-5",
+		Provider: "openai",
+		ClientID: "cursor",
+	}); err != nil {
+		t.Fatalf("record kafka: %v", err)
+	}
+
+	hits, err := s.SearchHistory(ctx, store.SearchHistoryIn{Query: "kafka retention", TopK: 5})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits.Hits) == 0 {
+		t.Fatal("expected at least one hit for 'kafka retention'")
+	}
+	if !strings.Contains(strings.ToLower(hits.Hits[0].Snippet), "kafka") {
+		t.Fatalf("top hit should mention kafka, got %q", hits.Hits[0].Snippet)
+	}
+
+	// Filter by client_id — 'claude-code' has no kafka message
+	filtered, err := s.SearchHistory(ctx, store.SearchHistoryIn{
+		Query: "kafka retention", TopK: 5, ClientID: "claude-code",
+	})
+	if err != nil {
+		t.Fatalf("search filtered: %v", err)
+	}
+	if len(filtered.Hits) != 0 {
+		t.Fatalf("expected no hits when filtering to claude-code, got %d", len(filtered.Hits))
+	}
 }
+
