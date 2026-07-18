@@ -1,0 +1,10 @@
+/dist/
+/bin/
+/chatmem
+*.log
+*.out
+.DS_Store
+.env
+.env.local
+coverage.out
+coverage.html
