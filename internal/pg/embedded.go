@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -21,6 +22,10 @@ type Config struct {
 	DataDir    string
 	RuntimeDir string
 	Port       uint32
+	// LogWriter receives Postgres subprocess output (initdb + server logs).
+	// Defaults to os.Stderr. Set to io.Discard to silence.
+	// IMPORTANT: never leave this as os.Stdout in an MCP-over-stdio context.
+	LogWriter io.Writer
 }
 
 type Embedded struct {
@@ -31,11 +36,15 @@ type Embedded struct {
 }
 
 func New(cfg Config) *Embedded {
+	if cfg.LogWriter == nil {
+		cfg.LogWriter = os.Stderr
+	}
 	pg := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
 		Version(embeddedpostgres.V18).
 		RuntimePath(cfg.RuntimeDir).
 		DataPath(cfg.DataDir).
 		Port(cfg.Port).
+		Logger(cfg.LogWriter).
 		StartTimeout(60 * time.Second))
 	return &Embedded{
 		cfg: cfg,

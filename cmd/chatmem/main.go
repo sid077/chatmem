@@ -11,9 +11,11 @@ var version = "0.0.1-dev"
 
 func main() {
 	root := &cobra.Command{
-		Use:     "chatmem",
-		Short:   "Local LLM chat history, served over MCP",
-		Version: version,
+		Use:           "chatmem",
+		Short:         "Local LLM chat history, served over MCP",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	root.AddCommand(
