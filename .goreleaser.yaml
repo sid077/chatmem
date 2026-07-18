@@ -1,0 +1,57 @@
+version: 2
+
+project_name: chatmem
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: chatmem
+    main: ./cmd/chatmem
+    binary: chatmem
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    # linux_amd64, linux_arm64, darwin_amd64 and windows require per-platform
+    # pgvector prebuilt libs under internal/pg/assets/<goos>_<goarch>/.
+    # Add them (and the corresponding entries here) as we build them in CI.
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# Publish to the personal Homebrew tap (own tap, not homebrew-core — the
+# bundled Postgres + pgvector assets push the tarball over the size ceiling
+# that core enforces).
+brews:
+  - name: chatmem
+    repository:
+      owner: siddhantdubey
+      name: homebrew-chatmem
+    homepage: "https://github.com/siddhantdubey/chatmem"
+    description: "Local LLM chat history, served over MCP"
+    license: "Apache-2.0"
+    install: |
+      bin.install "chatmem"
+    test: |
+      system "#{bin}/chatmem", "--version"
