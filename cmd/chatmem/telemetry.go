@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/siddhantdubey/chatmem/internal/telemetry"
 )
 
 func newTelemetryCmd() *cobra.Command {
@@ -16,7 +18,10 @@ func newTelemetryCmd() *cobra.Command {
 			Use:   "enable",
 			Short: "Enable anonymous telemetry",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				fmt.Println("telemetry enable: not implemented yet")
+				if err := telemetry.SetEnabled(dataHome(), true); err != nil {
+					return err
+				}
+				fmt.Println("telemetry: enabled")
 				return nil
 			},
 		},
@@ -24,7 +29,10 @@ func newTelemetryCmd() *cobra.Command {
 			Use:   "disable",
 			Short: "Disable all telemetry",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				fmt.Println("telemetry disable: not implemented yet")
+				if err := telemetry.SetEnabled(dataHome(), false); err != nil {
+					return err
+				}
+				fmt.Println("telemetry: disabled")
 				return nil
 			},
 		},
@@ -32,7 +40,15 @@ func newTelemetryCmd() *cobra.Command {
 			Use:   "status",
 			Short: "Show current telemetry setting and precedence source",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				fmt.Println("telemetry status: not implemented yet")
+				st, err := telemetry.Load(dataHome())
+				if err != nil {
+					return err
+				}
+				state := "disabled"
+				if st.Enabled {
+					state = "enabled"
+				}
+				fmt.Printf("telemetry: %s (source: %s)\ninstall_id: %s\n", state, st.Source, st.InstallID)
 				return nil
 			},
 		},
