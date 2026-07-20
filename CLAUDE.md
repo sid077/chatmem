@@ -44,6 +44,7 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 9. **Linux pgvector `.so` must be built against glibc 2.31 or older.** We use the `pgdg11+1` variant of the official apt package for that reason — anything newer bumps the glibc floor and breaks users on older distros. If you refresh the artifacts, keep using `pgdg11+1`.
 10. **RPM/DEB packages declare `glibc >= 2.31` / `libc6 (>= 2.31)`.** That dependency must always match the pgvector `.so`'s glibc floor. If someone rebuilds pgvector against a newer base, bump both in `.goreleaser.yaml`'s `nfpms.overrides`.
 11. **The gh-pages branch is auto-managed by the release workflow.** Never hand-edit it. It gets rewritten on every tag push (`keep_files: false` in the workflow), so contents are strictly the current release's RPM repo tree.
+12. **Homebrew distribution is a cask, not a formula.** `.goreleaser.yaml` uses `homebrew_casks:` because `brews:` was soft-deprecated in goreleaser v2.10. User-facing install command is `brew install --cask chatmem`. Cask files write to `homebrew-chatmem/Casks/chatmem.rb` (not `Formula/`).
 
 ## Platform support matrix
 

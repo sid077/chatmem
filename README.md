@@ -54,9 +54,9 @@ Working today:
 ## Quickstart
 
 ```bash
-# --- macOS (Homebrew tap) ---
+# --- macOS or Linuxbrew (Homebrew tap — ships as a cask) ---
 brew tap siddhantdubey/chatmem
-brew install chatmem
+brew install --cask chatmem
 
 # --- openSUSE / SUSE (zypper self-hosted repo) ---
 sudo zypper ar https://siddhantdubey.github.io/chatmem/chatmem.repo

@@ -75,10 +75,11 @@ changelog:
       - "^test:"
       - "^chore:"
 
-# Publish to the personal Homebrew tap (own tap, not homebrew-core — the
-# bundled Postgres + pgvector assets push the tarball over the size ceiling
-# that core enforces).
-brews:
+# Publish to the personal Homebrew tap as a cask (own tap, not homebrew-core —
+# the bundled Postgres + pgvector assets push the tarball over the size ceiling
+# that core enforces). Casks are the current preferred way to ship prebuilt
+# binaries via Homebrew (`brews:` was deprecated in v2.10).
+homebrew_casks:
   - name: chatmem
     repository:
       owner: siddhantdubey
@@ -86,7 +87,4 @@ brews:
     homepage: "https://github.com/siddhantdubey/chatmem"
     description: "Local LLM chat history, served over MCP"
     license: "Apache-2.0"
-    install: |
-      bin.install "chatmem"
-    test: |
-      system "#{bin}/chatmem", "--version"
+    binaries: [chatmem]
