@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -30,6 +31,9 @@ func newDaemonCmd() *cobra.Command {
 }
 
 func runDaemon(ctx context.Context, port uint32) error {
+	if err := requireNonRoot(); err != nil {
+		return err
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	dataDir := filepath.Join(dataHome(), "pgdata")
@@ -75,6 +79,19 @@ func dataHome() string {
 		return filepath.Join(os.TempDir(), "chatmem")
 	}
 	return filepath.Join(home, ".local", "share", "chatmem")
+}
+
+// requireNonRoot returns an error if we're running as root on a Unix host.
+// Postgres refuses to run under uid 0, so we surface that as a friendly
+// message before doing any provisioning work.
+func requireNonRoot() error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if os.Geteuid() == 0 {
+		return fmt.Errorf("chatmem cannot run as root — Postgres refuses to run under uid 0. Re-run as an unprivileged user (e.g. `su - <user> -c 'chatmem ...'`)")
+	}
+	return nil
 }
 
 func cacheHome() string {

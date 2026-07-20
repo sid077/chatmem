@@ -16,11 +16,16 @@ builds:
       - -s -w -X main.version={{ .Version }}
     goos:
       - darwin
+      - linux
     goarch:
+      - amd64
       - arm64
-    # linux_amd64, linux_arm64, darwin_amd64 and windows require per-platform
-    # pgvector prebuilt libs under internal/pg/assets/<goos>_<goarch>/.
-    # Add them (and the corresponding entries here) as we build them in CI.
+    # Currently shipped: darwin/arm64, linux/amd64, linux/arm64.
+    # darwin/amd64 needs a pgvector.dylib built for Intel Macs; ignored below.
+    # windows/amd64 needs a pgvector.dll; add when someone volunteers to build one.
+    ignore:
+      - goos: darwin
+        goarch: amd64
 
 archives:
   - formats: [tar.gz]

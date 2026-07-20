@@ -19,9 +19,15 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `internal/telemetry` | Install id + opt-out gate. | `Load(dataHome)`, `SetEnabled`, `Client.Ping` |
 
 Assets embedded via `//go:embed`:
-- `internal/pg/assets/darwin_arm64/vector.dylib` (pgvector 0.8.5 from Homebrew)
+- `internal/pg/assets/darwin_arm64/vector.dylib` (pgvector **0.8.5**, from Homebrew)
 - `internal/pg/assets/darwin_arm64/extension/{vector.control, vector--0.8.5.sql}`
+- `internal/pg/assets/linux_amd64/vector.so` (pgvector **0.8.3**, from apt.postgresql.org `pgdg11+1` — glibc 2.31 baseline)
+- `internal/pg/assets/linux_amd64/extension/{vector.control, vector--0.8.3.sql}`
+- `internal/pg/assets/linux_arm64/vector.so` (pgvector **0.8.3**, same source, arm64)
+- `internal/pg/assets/linux_arm64/extension/{vector.control, vector--0.8.3.sql}`
 - `internal/store/schema.sql`
+
+The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentional — the upstream Debian package for PG18 only goes up to 0.8.3 at time of writing. Both versions support `vector(384)`, HNSW, and the operators we use.
 
 ## Invariants (do not break)
 
@@ -32,21 +38,24 @@ Assets embedded via `//go:embed`:
 5. **`gen_random_uuid()` is used in DDL defaults** — this requires Postgres 13+. We target PG18. Do not add a `pgcrypto` extension dependency.
 6. **Search fetches `TopK * 3` and dedupes by `conversation_id`** (MMR-lite). Do not remove the dedupe.
 7. **Postgres binary is a universal Mach-O fat binary via Zonky/Maven** (contains both x86_64 and arm64 slices). The runtime string reads `x86_64-apple-darwin24.6.0` even on arm64 — that is the *build* architecture, not the runtime. The extension loads native arm64 dylib successfully because the process is native arm64.
+8. **`chatmem cannot run as root` on Linux/macOS.** All three long-running subcommands (`init`, `daemon`, `mcp`) call `requireNonRoot()` before doing anything, because Postgres refuses to run under uid 0 and its own error message is unhelpful. Do not remove that guard.
+9. **Linux pgvector `.so` must be built against glibc 2.31 or older.** We use the `pgdg11+1` variant of the official apt package for that reason — anything newer bumps the glibc floor and breaks users on older distros. If you refresh the artifacts, keep using `pgdg11+1`.
 
 ## Platform support matrix
 
-| GOOS/GOARCH   | Status | Notes |
-|---------------|--------|-------|
-| `darwin/arm64` | ✅ working | Full assets in-repo |
-| `darwin/amd64` | ⚠️ not built | Needs `vector.dylib` for postgresql@18 amd64 |
-| `linux/amd64`  | ⚠️ not built | Needs `vector.so`; would source from Debian/Ubuntu package or self-compile |
-| `linux/arm64`  | ⚠️ not built | Same as above |
-| `windows/amd64`| ⚠️ not built | Needs `vector.dll`; `kardianos/service` for daemon autostart |
+| GOOS/GOARCH    | Status         | Notes |
+|----------------|----------------|-------|
+| `darwin/arm64` | ✅ working     | pgvector 0.8.5 from Homebrew, live use |
+| `linux/amd64`  | ✅ working     | pgvector 0.8.3 from apt.postgresql.org (pgdg11+1); verified in Debian 12 container |
+| `linux/arm64`  | ✅ working     | pgvector 0.8.3 from apt.postgresql.org (pgdg11+1); verified in Debian 12 container |
+| `darwin/amd64` | ⚠️ not built   | Needs a `vector.dylib` for postgresql@18 amd64 (Homebrew Intel bottle or self-compile) |
+| `windows/amd64`| ⚠️ not built   | Needs `vector.dll`; `kardianos/service` for daemon autostart |
 
 To add a platform:
-1. Copy pgvector `.so`/`.dylib`/`.dll` + `extension/*` to `internal/pg/assets/<goos>_<goarch>/`.
-2. Add the goos/goarch to `.goreleaser.yaml`'s `builds.goos` / `builds.goarch`.
-3. `go build ./...` for a quick sanity check.
+1. Copy pgvector `.so`/`.dylib`/`.dll` + `extension/{vector.control, vector--<ver>.sql}` to `internal/pg/assets/<goos>_<goarch>/`. Version number in the SQL filename does not have to match darwin — the `installPgvector` code copies whatever is in `extension/`.
+2. Add the goos/goarch to `.goreleaser.yaml`'s `builds.goos` / `builds.goarch` (and update the `ignore:` list if needed).
+3. Cross-compile and verify: `GOOS=<x> GOARCH=<y> CGO_ENABLED=0 go build -o /tmp/chatmem-<x>-<y> ./cmd/chatmem`.
+4. If possible, run the binary in a container/VM for that platform and verify `chatmem init` succeeds + `CREATE EXTENSION vector` works.
 
 ## Ports
 
@@ -75,11 +84,32 @@ go test ./... -count=1 -timeout=240s
 /tmp/chatmem telemetry status                  # check telemetry state
 /tmp/chatmem mcp --port 54329                  # serve stdio MCP
 
-# refresh pgvector assets after `brew upgrade pgvector`
+# refresh darwin pgvector assets after `brew upgrade pgvector`
 cp /opt/homebrew/Cellar/pgvector/*/lib/postgresql@18/vector.dylib \
    internal/pg/assets/darwin_arm64/vector.dylib
 cp /opt/homebrew/Cellar/pgvector/*/share/postgresql@18/extension/{vector.control,vector--0.8.5.sql} \
    internal/pg/assets/darwin_arm64/extension/
+
+# refresh linux pgvector assets (both archs) from apt.postgresql.org
+for arch in amd64 arm64; do
+  curl -sSLo /tmp/pgv-$arch.deb \
+    "https://apt.postgresql.org/pub/repos/apt/pool/main/p/pgvector/postgresql-18-pgvector_0.8.3-1.pgdg11+1_${arch}.deb"
+  tmp=$(mktemp -d); (cd "$tmp" && ar x /tmp/pgv-$arch.deb && tar -xf data.tar.xz)
+  cp "$tmp/usr/lib/postgresql/18/lib/vector.so" internal/pg/assets/linux_${arch}/vector.so
+  cp "$tmp/usr/share/postgresql/18/extension/"{vector.control,vector--0.8.3.sql} \
+     internal/pg/assets/linux_${arch}/extension/
+done
+
+# cross-compile all supported platforms in one go
+for target in darwin/arm64 linux/amd64 linux/arm64; do
+  GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build \
+    -o /tmp/chatmem-${target/\//-} ./cmd/chatmem
+done
+
+# verify a linux binary in a container (arm64 host)
+docker run --rm --platform linux/arm64 \
+  -v /tmp/chatmem-linux-arm64:/usr/local/bin/chatmem:ro debian:12-slim \
+  bash -c 'useradd -m u && su - u -c "/usr/local/bin/chatmem init"'
 
 # dependencies
 go get <module>@latest

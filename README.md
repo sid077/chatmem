@@ -30,7 +30,17 @@ Only anonymous telemetry (install ID, aggregate counters, opt-in crash reports) 
 
 ## Status
 
-Pre-alpha. Working end-to-end on **macOS arm64** as of `v0.0.1-dev`. Other platforms need additional pgvector prebuilts — see [Roadmap](#roadmap).
+Pre-alpha (`v0.0.1-dev`). Fully working platforms:
+
+| Platform        | pgvector version | Verified |
+|-----------------|-------------------|----------|
+| `darwin/arm64`  | 0.8.5             | Live use |
+| `linux/amd64`   | 0.8.3             | End-to-end in a Debian 12 container |
+| `linux/arm64`   | 0.8.3             | End-to-end in a Debian 12 container |
+| `darwin/amd64`  | —                 | Needs an Intel-Mac pgvector.dylib |
+| `windows/amd64` | —                 | Needs a pgvector.dll + service story |
+
+The version skew between macOS and Linux is intentional (Homebrew ships 0.8.5, official Postgres apt ships 0.8.3 for PG18). Both are wire-compatible for our use — same operators, same HNSW support.
 
 Working today:
 
@@ -44,9 +54,13 @@ Working today:
 ## Quickstart
 
 ```bash
-# 1) install (Homebrew tap — coming with v0.0.1 release)
+# --- macOS (Homebrew tap — coming with v0.0.1 release) ---
 brew tap siddhantdubey/chatmem
 brew install chatmem
+
+# --- Linux (direct download of the tarball for your arch) ---
+# curl -sSL https://github.com/siddhantdubey/chatmem/releases/latest/download/chatmem_$(uname -s)_$(uname -m).tar.gz \
+#     | tar -xz && sudo mv chatmem /usr/local/bin/
 
 # 2) bootstrap the local database — prints the JSON snippet to paste into your MCP client
 chatmem init
@@ -236,9 +250,10 @@ chatmem/
 ├── internal/
 │   ├── pg/                     # embedded-postgres wrapper + pgvector install
 │   │   ├── embedded.go
-│   │   └── assets/darwin_arm64/
-│   │       ├── vector.dylib
-│   │       └── extension/{vector.control,vector--0.8.5.sql}
+│   │   └── assets/
+│   │       ├── darwin_arm64/vector.dylib + extension/{vector.control,vector--0.8.5.sql}
+│   │       ├── linux_amd64/vector.so     + extension/{vector.control,vector--0.8.3.sql}
+│   │       └── linux_arm64/vector.so     + extension/{vector.control,vector--0.8.3.sql}
 │   ├── store/                  # schema + pgx-backed data access
 │   │   ├── schema.sql
 │   │   ├── store.go            # EnsureSchema, RecordMessage, SearchHistory, GetConversation
@@ -264,15 +279,28 @@ cd chatmem
 go build ./...
 ```
 
-To refresh the vendored pgvector artifacts from Homebrew (e.g. on upgrade):
+To refresh the vendored pgvector artifacts:
 
 ```bash
+# darwin (from Homebrew) — refreshes internal/pg/assets/darwin_arm64/
 brew install pgvector
 cp /opt/homebrew/Cellar/pgvector/0.8.5/lib/postgresql@18/vector.dylib \
    internal/pg/assets/darwin_arm64/vector.dylib
 cp /opt/homebrew/Cellar/pgvector/0.8.5/share/postgresql@18/extension/{vector.control,vector--0.8.5.sql} \
    internal/pg/assets/darwin_arm64/extension/
+
+# linux amd64/arm64 (from official PostgreSQL apt, pgdg11+1 for glibc 2.31 baseline)
+for arch in amd64 arm64; do
+  curl -sSLo /tmp/pgv-$arch.deb \
+    "https://apt.postgresql.org/pub/repos/apt/pool/main/p/pgvector/postgresql-18-pgvector_0.8.3-1.pgdg11+1_${arch}.deb"
+  tmp=$(mktemp -d); cd "$tmp"; ar x /tmp/pgv-$arch.deb; tar -xf data.tar.xz
+  cp "$tmp/usr/lib/postgresql/18/lib/vector.so" internal/pg/assets/linux_${arch}/vector.so
+  cp "$tmp/usr/share/postgresql/18/extension/"{vector.control,vector--0.8.3.sql} \
+     internal/pg/assets/linux_${arch}/extension/
+done
 ```
+
+The Linux `.so` is built against Debian 11's glibc 2.31 for maximum runtime compatibility — anything with glibc ≥ 2.31 works (Debian 11+, Ubuntu 22.04+, RHEL 9+, Alpine with `libc6-compat`, etc.).
 
 ## Testing
 
@@ -307,6 +335,8 @@ Tests use distinct hard-coded ports (`54334`, `54335`, `54336`) — run one test
 
 ## Troubleshooting
 
+**`chatmem cannot run as root`** — on Linux, Postgres refuses to run under uid 0 and chatmem now refuses too, up-front. Re-run as an unprivileged user: `su - <username> -c 'chatmem init'` (or `sudo -u <username> chatmem init`).
+
 **`chatmem mcp` client sees "invalid character 'T' looking for beginning of value"** — the MCP protocol runs over stdout; something is writing non-JSON there. Most likely `embedded-postgres` was configured with `logger: os.Stdout` instead of `os.Stderr` (default here is `os.Stderr`; check `internal/pg/embedded.go` if you customized).
 
 **`no embedded pgvector assets for <goos>/<goarch>`** — you are running on an unsupported platform. Copy a matching prebuilt pgvector into `internal/pg/assets/<goos>_<goarch>/` (see [Building from source](#building-from-source) for the file layout) and rebuild.
@@ -331,7 +361,7 @@ rm -f  ~/.claude/mcp.json             # or hand-remove the chatmem entry
 
 **Next up (still MVP-scope):**
 - ONNX MiniLM int8 embedder → upgrade `search_history` from keyword to semantic.
-- Multi-platform pgvector assets: `linux_amd64`, `darwin_amd64`, `linux_arm64`, `windows_amd64`.
+- Remaining platforms: `darwin/amd64` (Intel Mac) and `windows/amd64`.
 - Cloudflare Worker ingest endpoint for real telemetry pings.
 - `chatmem daemon` HTTP MCP + `chatmem mcp` stdio-to-HTTP shim so multiple MCP clients can share one Postgres.
 

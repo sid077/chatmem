@@ -31,6 +31,9 @@ func newMCPCmd() *cobra.Command {
 }
 
 func runMCP(ctx context.Context, port uint32) error {
+	if err := requireNonRoot(); err != nil {
+		return err
+	}
 	// MCP protocol uses stdout — log to stderr.
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
