@@ -34,6 +34,36 @@ archives:
       - LICENSE
       - README.md
 
+# Linux packages: consumed by zypper (via a self-hosted repo — see
+# scripts/build-rpm-repo.sh) and apt/dnf if you want to layer those on later.
+nfpms:
+  - id: chatmem
+    package_name: chatmem
+    file_name_template: "{{ .ConventionalFileName }}"
+    homepage: https://github.com/siddhantdubey/chatmem
+    description: |
+      Local LLM chat history, served over MCP.
+      Captures conversations from any MCP-compatible LLM client
+      (Claude Code, Cursor, aider) into an embedded Postgres +
+      pgvector database on your own machine.
+    maintainer: Siddhant Dubey <siddhant.d777@gmail.com>
+    license: Apache-2.0
+    vendor: chatmem
+    section: utils
+    formats:
+      - rpm
+      - deb
+    bindir: /usr/bin
+    # Runtime glibc floor matches the pgvector.so we embed
+    # (built against Debian 11 / glibc 2.31 via pgdg11+1).
+    overrides:
+      rpm:
+        dependencies:
+          - "glibc >= 2.31"
+      deb:
+        dependencies:
+          - "libc6 (>= 2.31)"
+
 checksum:
   name_template: "checksums.txt"
 

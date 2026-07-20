@@ -17,6 +17,8 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `internal/store` | pgx-backed data access + schema. | `EnsureSchema`, `RecordMessage`, `SearchHistory`, `GetConversation` |
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
 | `internal/telemetry` | Install id + opt-out gate. | `Load(dataHome)`, `SetEnabled`, `Client.Ping` |
+| `scripts/build-rpm-repo.sh` | Assembles a zypper/dnf-compatible repo tree from `dist/*.rpm`. Runs `createrepo_c` inside a `fedora:41` docker container so macOS hosts don't need it installed. Default `BASE_URL` = `https://siddhantdubey.github.io/chatmem`. | `scripts/build-rpm-repo.sh [BASE_URL]` |
+| `.github/workflows/release.yml` | Tag-triggered release: `goreleaser release --clean` → assemble RPM repo tree with `createrepo_c` (native, not docker, in CI) → push to `gh-pages` branch. | `git push origin vX.Y.Z` |
 
 Assets embedded via `//go:embed`:
 - `internal/pg/assets/darwin_arm64/vector.dylib` (pgvector **0.8.5**, from Homebrew)
@@ -40,6 +42,8 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 7. **Postgres binary is a universal Mach-O fat binary via Zonky/Maven** (contains both x86_64 and arm64 slices). The runtime string reads `x86_64-apple-darwin24.6.0` even on arm64 — that is the *build* architecture, not the runtime. The extension loads native arm64 dylib successfully because the process is native arm64.
 8. **`chatmem cannot run as root` on Linux/macOS.** All three long-running subcommands (`init`, `daemon`, `mcp`) call `requireNonRoot()` before doing anything, because Postgres refuses to run under uid 0 and its own error message is unhelpful. Do not remove that guard.
 9. **Linux pgvector `.so` must be built against glibc 2.31 or older.** We use the `pgdg11+1` variant of the official apt package for that reason — anything newer bumps the glibc floor and breaks users on older distros. If you refresh the artifacts, keep using `pgdg11+1`.
+10. **RPM/DEB packages declare `glibc >= 2.31` / `libc6 (>= 2.31)`.** That dependency must always match the pgvector `.so`'s glibc floor. If someone rebuilds pgvector against a newer base, bump both in `.goreleaser.yaml`'s `nfpms.overrides`.
+11. **The gh-pages branch is auto-managed by the release workflow.** Never hand-edit it. It gets rewritten on every tag push (`keep_files: false` in the workflow), so contents are strictly the current release's RPM repo tree.
 
 ## Platform support matrix
 
@@ -110,6 +114,11 @@ done
 docker run --rm --platform linux/arm64 \
   -v /tmp/chatmem-linux-arm64:/usr/local/bin/chatmem:ro debian:12-slim \
   bash -c 'useradd -m u && su - u -c "/usr/local/bin/chatmem init"'
+
+# dry-run the full release locally (no publish, no tag)
+goreleaser release --snapshot --clean --skip=publish
+scripts/build-rpm-repo.sh
+# then serve dist/rpm-repo/ and test zypper install in opensuse/leap:15.6
 
 # dependencies
 go get <module>@latest

@@ -1,0 +1,83 @@
+name: release
+
+# Triggered by pushing a v* tag. Runs goreleaser (which builds binaries,
+# tarballs, .rpm, .deb, uploads to the GitHub Release, and pushes the
+# Homebrew formula to siddhantdubey/homebrew-chatmem), then assembles a
+# zypper/dnf-compatible RPM repo tree and publishes it to the gh-pages
+# branch so users can `zypper ar https://siddhantdubey.github.io/chatmem/chatmem.repo`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # for goreleaser to create the GitHub Release
+  pages: write     # for publishing the RPM repo to gh-pages
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Install createrepo_c
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y createrepo-c
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          # Default GITHUB_TOKEN can push to the tap repo if it lives under
+          # the same owner. If the tap is owned by another org, set
+          # HOMEBREW_TAP_GITHUB_TOKEN as a repo secret.
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Assemble RPM repo tree
+        run: |
+          # Run the createrepo step directly (skip the docker-in-docker path
+          # since createrepo_c is already installed on the runner).
+          set -euo pipefail
+          OUT=dist/rpm-repo
+          BASE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
+          rm -rf "$OUT" && mkdir -p "$OUT/x86_64" "$OUT/aarch64"
+          cp dist/*.x86_64.rpm  "$OUT/x86_64/"
+          cp dist/*.aarch64.rpm "$OUT/aarch64/"
+          for arch in x86_64 aarch64; do createrepo_c --quiet "$OUT/$arch"; done
+          cat > "$OUT/chatmem.repo" <<REPO
+          [chatmem]
+          name=chatmem
+          baseurl=$BASE_URL/\$basearch/
+          enabled=1
+          autorefresh=1
+          gpgcheck=0
+          type=rpm-md
+          REPO
+          # Minimal landing page so people who load the base URL in a browser
+          # get a helpful pointer instead of a 404.
+          cat > "$OUT/index.html" <<HTML
+          <!doctype html><meta charset=utf-8><title>chatmem RPM repo</title>
+          <h1>chatmem — RPM repo</h1>
+          <p>Install on openSUSE / SLES / Fedora / RHEL:
+          <pre>sudo zypper ar $BASE_URL/chatmem.repo   # openSUSE
+          sudo dnf config-manager --add-repo $BASE_URL/chatmem.repo  # Fedora/RHEL
+          sudo zypper in chatmem</pre>
+          <p>See <a href="https://github.com/${{ github.repository }}">the source repo</a> for docs.
+          HTML
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist/rpm-repo
+          publish_branch: gh-pages
+          keep_files: false
+          commit_message: "release: ${{ github.ref_name }}"

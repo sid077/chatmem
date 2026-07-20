@@ -32,13 +32,13 @@ Only anonymous telemetry (install ID, aggregate counters, opt-in crash reports) 
 
 Pre-alpha (`v0.0.1-dev`). Fully working platforms:
 
-| Platform        | pgvector version | Verified |
-|-----------------|-------------------|----------|
-| `darwin/arm64`  | 0.8.5             | Live use |
-| `linux/amd64`   | 0.8.3             | End-to-end in a Debian 12 container |
-| `linux/arm64`   | 0.8.3             | End-to-end in a Debian 12 container |
-| `darwin/amd64`  | —                 | Needs an Intel-Mac pgvector.dylib |
-| `windows/amd64` | —                 | Needs a pgvector.dll + service story |
+| Platform        | pgvector | Distribution                                 | Verified |
+|-----------------|----------|-----------------------------------------------|----------|
+| `darwin/arm64`  | 0.8.5    | Homebrew tap                                  | Live use |
+| `linux/amd64`   | 0.8.3    | RPM (zypper/dnf) + DEB + tarball              | Debian 12 container + openSUSE Leap 15.6 container |
+| `linux/arm64`   | 0.8.3    | RPM (zypper/dnf) + DEB + tarball              | Debian 12 container + openSUSE Leap 15.6 container |
+| `darwin/amd64`  | —        | —                                             | Needs an Intel-Mac pgvector.dylib |
+| `windows/amd64` | —        | —                                             | Needs a pgvector.dll + service story |
 
 The version skew between macOS and Linux is intentional (Homebrew ships 0.8.5, official Postgres apt ships 0.8.3 for PG18). Both are wire-compatible for our use — same operators, same HNSW support.
 
@@ -54,12 +54,25 @@ Working today:
 ## Quickstart
 
 ```bash
-# --- macOS (Homebrew tap — coming with v0.0.1 release) ---
+# --- macOS (Homebrew tap) ---
 brew tap siddhantdubey/chatmem
 brew install chatmem
 
-# --- Linux (direct download of the tarball for your arch) ---
-# curl -sSL https://github.com/siddhantdubey/chatmem/releases/latest/download/chatmem_$(uname -s)_$(uname -m).tar.gz \
+# --- openSUSE / SUSE (zypper self-hosted repo) ---
+sudo zypper ar https://siddhantdubey.github.io/chatmem/chatmem.repo
+sudo zypper --gpg-auto-import-keys refresh
+sudo zypper in chatmem
+
+# --- Fedora / RHEL (dnf, same repo) ---
+sudo dnf config-manager --add-repo https://siddhantdubey.github.io/chatmem/chatmem.repo
+sudo dnf install chatmem
+
+# --- Debian / Ubuntu (direct .deb download; APT repo TBD) ---
+# curl -sSLo /tmp/chatmem.deb https://github.com/siddhantdubey/chatmem/releases/latest/download/chatmem_<ver>_<arch>.deb
+# sudo apt install /tmp/chatmem.deb
+
+# --- direct download (any Linux) ---
+# curl -sSL https://github.com/siddhantdubey/chatmem/releases/latest/download/chatmem_Linux_x86_64.tar.gz \
 #     | tar -xz && sudo mv chatmem /usr/local/bin/
 
 # 2) bootstrap the local database — prints the JSON snippet to paste into your MCP client
@@ -263,7 +276,9 @@ chatmem/
 │   │   └── server_test.go      # in-process MCP round-trip
 │   └── telemetry/              # install_id + opt-out gate
 │       └── telemetry.go
-├── .goreleaser.yaml            # cross-platform build + Homebrew tap publishing
+├── .goreleaser.yaml            # cross-platform build + Homebrew tap + rpm/deb via nfpm
+├── .github/workflows/release.yml  # tag push → goreleaser + gh-pages RPM repo publish
+├── scripts/build-rpm-repo.sh   # assemble zypper/dnf repo tree locally (uses createrepo_c via docker)
 ├── README.md
 ├── CLAUDE.md                   # in-repo dev docs, auto-loaded by Claude Code
 └── LICENSE                     # Apache-2.0
@@ -372,6 +387,51 @@ rm -f  ~/.claude/mcp.json             # or hand-remove the chatmem entry
 - Python + TypeScript SDK wrappers around the MCP tools.
 - Distribution to apt, dnf/COPR, zypper/OBS, AUR, winget, scoop.
 - Docs site.
+
+## Publishing a release
+
+Tag-triggered — the `release` GitHub Actions workflow does everything.
+
+```bash
+git tag -a v0.0.1 -m "v0.0.1"
+git push origin v0.0.1
+```
+
+On tag push the workflow:
+
+1. Runs `goreleaser release --clean` — cross-compiles darwin/arm64 + linux/amd64 + linux/arm64, packages `.tar.gz` + `.rpm` + `.deb`, uploads the archives to the GitHub Release, and pushes the updated Homebrew formula into `siddhantdubey/homebrew-chatmem`.
+2. Runs `createrepo_c` on the `.rpm`s to build a zypper/dnf-compatible repo tree.
+3. Pushes the repo tree to the `gh-pages` branch of this repository.
+
+Users then get updates via `zypper refresh` / `brew upgrade` / `dnf update` without any further action from you.
+
+To dry-run locally before tagging:
+
+```bash
+goreleaser release --snapshot --clean --skip=publish   # produces dist/*
+scripts/build-rpm-repo.sh                              # produces dist/rpm-repo/ (needs Docker for createrepo_c)
+```
+
+Verify with an openSUSE container:
+
+```bash
+cd dist/rpm-repo && python3 -m http.server 8765 &
+docker run --rm --platform linux/arm64 --add-host=host.docker.internal:host-gateway \
+  opensuse/leap:15.6 bash -c '
+    echo -e "[chatmem]\nbaseurl=http://host.docker.internal:8765/\$basearch/\nenabled=1\ngpgcheck=0" > /etc/zypp/repos.d/chatmem.repo
+    zypper --non-interactive refresh chatmem
+    zypper --non-interactive install chatmem
+    chatmem --version'
+```
+
+### GPG signing (recommended for production)
+
+MVP ships unsigned (`gpgcheck=0` in the `.repo` file). To sign:
+
+1. Generate a GPG key: `gpg --gen-key`.
+2. Export the public key: `gpg --armor --export you@example.com > chatmem.gpg`.
+3. In `.goreleaser.yaml`, add `signs:` for the rpms with your key id.
+4. Copy `chatmem.gpg` alongside the `.repo` file in `dist/rpm-repo/` and change `gpgcheck=1` + `gpgkey=<URL>/chatmem.gpg`.
 
 ## License
 
