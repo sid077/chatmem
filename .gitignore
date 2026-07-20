@@ -8,3 +8,6 @@
 .env.local
 coverage.out
 coverage.html
+.idea/
+.vscode/
+*.swp
