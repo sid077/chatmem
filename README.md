@@ -350,6 +350,14 @@ Tests use distinct hard-coded ports (`54334`, `54335`, `54336`) — run one test
 
 ## Troubleshooting
 
+**On macOS after `brew install --cask chatmem`: binary killed with `zsh: killed chatmem`** — Gatekeeper quarantined the unsigned cask binary. Strip the attribute:
+
+```bash
+xattr -d com.apple.quarantine "$(brew --prefix)/bin/chatmem"
+```
+
+The real fix is signing + notarizing the darwin binary with an Apple Developer ID (planned for v0.0.2).
+
 **`chatmem cannot run as root`** — on Linux, Postgres refuses to run under uid 0 and chatmem now refuses too, up-front. Re-run as an unprivileged user: `su - <username> -c 'chatmem init'` (or `sudo -u <username> chatmem init`).
 
 **`chatmem mcp` client sees "invalid character 'T' looking for beginning of value"** — the MCP protocol runs over stdout; something is writing non-JSON there. Most likely `embedded-postgres` was configured with `logger: os.Stdout` instead of `os.Stderr` (default here is `os.Stderr`; check `internal/pg/embedded.go` if you customized).
