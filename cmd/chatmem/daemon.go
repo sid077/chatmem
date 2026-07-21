@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	chatpg "github.com/siddhantdubey/chatmem/internal/pg"
+	chatpg "github.com/sid077/chatmem/internal/pg"
 )
 
 const defaultPort uint32 = 54329

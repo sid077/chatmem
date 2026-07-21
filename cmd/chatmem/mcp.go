@@ -12,9 +12,9 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
-	chatmcp "github.com/siddhantdubey/chatmem/internal/mcp"
-	chatpg "github.com/siddhantdubey/chatmem/internal/pg"
-	"github.com/siddhantdubey/chatmem/internal/store"
+	chatmcp "github.com/sid077/chatmem/internal/mcp"
+	chatpg "github.com/sid077/chatmem/internal/pg"
+	"github.com/sid077/chatmem/internal/store"
 )
 
 func newMCPCmd() *cobra.Command {

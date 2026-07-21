@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	chatpg "github.com/siddhantdubey/chatmem/internal/pg"
-	"github.com/siddhantdubey/chatmem/internal/store"
+	chatpg "github.com/sid077/chatmem/internal/pg"
+	"github.com/sid077/chatmem/internal/store"
 )
 
 func TestStoreRoundTrip(t *testing.T) {

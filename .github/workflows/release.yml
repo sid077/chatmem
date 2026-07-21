@@ -2,9 +2,9 @@ name: release
 
 # Triggered by pushing a v* tag. Runs goreleaser (which builds binaries,
 # tarballs, .rpm, .deb, uploads to the GitHub Release, and pushes the
-# Homebrew formula to siddhantdubey/homebrew-chatmem), then assembles a
+# Homebrew formula to sid077/homebrew-chatmem), then assembles a
 # zypper/dnf-compatible RPM repo tree and publishes it to the gh-pages
-# branch so users can `zypper ar https://siddhantdubey.github.io/chatmem/chatmem.repo`.
+# branch so users can `zypper ar https://sid077.github.io/chatmem/chatmem.repo`.
 on:
   push:
     tags: ['v*']

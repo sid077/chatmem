@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/siddhantdubey/chatmem/internal/store"
+	"github.com/sid077/chatmem/internal/store"
 )
 
 func NewServer(st *store.Store, version string) *sdk.Server {

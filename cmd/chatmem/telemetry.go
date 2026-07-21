@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/siddhantdubey/chatmem/internal/telemetry"
+	"github.com/sid077/chatmem/internal/telemetry"
 )
 
 func newTelemetryCmd() *cobra.Command {

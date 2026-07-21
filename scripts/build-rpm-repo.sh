@@ -20,7 +20,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$REPO_ROOT/dist"
 OUT="$DIST/rpm-repo"
-BASE_URL="${1:-https://siddhantdubey.github.io/chatmem}"
+BASE_URL="${1:-https://sid077.github.io/chatmem}"
 
 if ! ls "$DIST"/*.rpm >/dev/null 2>&1; then
   echo "no .rpm files found in $DIST — run 'goreleaser release --snapshot --clean' first" >&2

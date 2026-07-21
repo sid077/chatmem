@@ -1,4 +1,4 @@
-module github.com/siddhantdubey/chatmem
+module github.com/sid077/chatmem
 
 go 1.26.5
 

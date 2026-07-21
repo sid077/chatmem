@@ -17,7 +17,7 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `internal/store` | pgx-backed data access + schema. | `EnsureSchema`, `RecordMessage`, `SearchHistory`, `GetConversation` |
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
 | `internal/telemetry` | Install id + opt-out gate. | `Load(dataHome)`, `SetEnabled`, `Client.Ping` |
-| `scripts/build-rpm-repo.sh` | Assembles a zypper/dnf-compatible repo tree from `dist/*.rpm`. Runs `createrepo_c` inside a `fedora:41` docker container so macOS hosts don't need it installed. Default `BASE_URL` = `https://siddhantdubey.github.io/chatmem`. | `scripts/build-rpm-repo.sh [BASE_URL]` |
+| `scripts/build-rpm-repo.sh` | Assembles a zypper/dnf-compatible repo tree from `dist/*.rpm`. Runs `createrepo_c` inside a `fedora:41` docker container so macOS hosts don't need it installed. Default `BASE_URL` = `https://sid077.github.io/chatmem`. | `scripts/build-rpm-repo.sh [BASE_URL]` |
 | `.github/workflows/release.yml` | Tag-triggered release: `goreleaser release --clean` → assemble RPM repo tree with `createrepo_c` (native, not docker, in CI) → push to `gh-pages` branch. | `git push origin vX.Y.Z` |
 
 Assets embedded via `//go:embed`:

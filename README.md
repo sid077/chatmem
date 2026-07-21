@@ -55,24 +55,24 @@ Working today:
 
 ```bash
 # --- macOS or Linuxbrew (Homebrew tap — ships as a cask) ---
-brew tap siddhantdubey/chatmem
+brew tap sid077/chatmem
 brew install --cask chatmem
 
 # --- openSUSE / SUSE (zypper self-hosted repo) ---
-sudo zypper ar https://siddhantdubey.github.io/chatmem/chatmem.repo
+sudo zypper ar https://sid077.github.io/chatmem/chatmem.repo
 sudo zypper --gpg-auto-import-keys refresh
 sudo zypper in chatmem
 
 # --- Fedora / RHEL (dnf, same repo) ---
-sudo dnf config-manager --add-repo https://siddhantdubey.github.io/chatmem/chatmem.repo
+sudo dnf config-manager --add-repo https://sid077.github.io/chatmem/chatmem.repo
 sudo dnf install chatmem
 
 # --- Debian / Ubuntu (direct .deb download; APT repo TBD) ---
-# curl -sSLo /tmp/chatmem.deb https://github.com/siddhantdubey/chatmem/releases/latest/download/chatmem_<ver>_<arch>.deb
+# curl -sSLo /tmp/chatmem.deb https://github.com/sid077/chatmem/releases/latest/download/chatmem_<ver>_<arch>.deb
 # sudo apt install /tmp/chatmem.deb
 
 # --- direct download (any Linux) ---
-# curl -sSL https://github.com/siddhantdubey/chatmem/releases/latest/download/chatmem_Linux_x86_64.tar.gz \
+# curl -sSL https://github.com/sid077/chatmem/releases/latest/download/chatmem_Linux_x86_64.tar.gz \
 #     | tar -xz && sudo mv chatmem /usr/local/bin/
 
 # 2) bootstrap the local database — prints the JSON snippet to paste into your MCP client
@@ -289,7 +289,7 @@ chatmem/
 Requires **Go 1.26+** and, for now, Homebrew's pgvector 0.8.5 (only if you want to refresh the vendored dylib — the committed copy is enough to build).
 
 ```bash
-git clone https://github.com/siddhantdubey/chatmem
+git clone https://github.com/sid077/chatmem
 cd chatmem
 go build ./...
 ```
@@ -399,7 +399,7 @@ git push origin v0.0.1
 
 On tag push the workflow:
 
-1. Runs `goreleaser release --clean` — cross-compiles darwin/arm64 + linux/amd64 + linux/arm64, packages `.tar.gz` + `.rpm` + `.deb`, uploads the archives to the GitHub Release, and pushes the updated Homebrew formula into `siddhantdubey/homebrew-chatmem`.
+1. Runs `goreleaser release --clean` — cross-compiles darwin/arm64 + linux/amd64 + linux/arm64, packages `.tar.gz` + `.rpm` + `.deb`, uploads the archives to the GitHub Release, and pushes the updated Homebrew formula into `sid077/homebrew-chatmem`.
 2. Runs `createrepo_c` on the `.rpm`s to build a zypper/dnf-compatible repo tree.
 3. Pushes the repo tree to the `gh-pages` branch of this repository.
 

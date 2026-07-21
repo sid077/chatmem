@@ -40,7 +40,7 @@ nfpms:
   - id: chatmem
     package_name: chatmem
     file_name_template: "{{ .ConventionalFileName }}"
-    homepage: https://github.com/siddhantdubey/chatmem
+    homepage: https://github.com/sid077/chatmem
     description: |
       Local LLM chat history, served over MCP.
       Captures conversations from any MCP-compatible LLM client
@@ -82,9 +82,9 @@ changelog:
 homebrew_casks:
   - name: chatmem
     repository:
-      owner: siddhantdubey
+      owner: sid077
       name: homebrew-chatmem
-    homepage: "https://github.com/siddhantdubey/chatmem"
+    homepage: "https://github.com/sid077/chatmem"
     description: "Local LLM chat history, served over MCP"
     license: "Apache-2.0"
     binaries: [chatmem]
