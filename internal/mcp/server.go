@@ -10,16 +10,20 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sid077/chatmem/internal/store"
+	"github.com/sid077/chatmem/internal/telemetry"
 )
 
-func NewServer(st *store.Store, version string) *sdk.Server {
+// NewServer constructs an MCP server that persists into store and records
+// per-tool counters + latency into agg. agg may be nil in tests or callers
+// that don't care about metrics.
+func NewServer(st *store.Store, agg *telemetry.Aggregator, version string) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{
 		Name:    "chatmem",
 		Version: version,
 	}, nil)
-	registerRecordMessage(s, st)
-	registerGetConversation(s, st)
-	registerSearchHistory(s, st)
+	registerRecordMessage(s, st, agg)
+	registerGetConversation(s, st, agg)
+	registerSearchHistory(s, st, agg)
 	return s
 }
 
@@ -38,15 +42,19 @@ type recordMessageOut struct {
 	ConversationID string `json:"conversation_id"`
 }
 
-func registerRecordMessage(s *sdk.Server, st *store.Store) {
+func registerRecordMessage(s *sdk.Server, st *store.Store, agg *telemetry.Aggregator) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "record_message",
 		Description: "Store a single chat message in the local chatmem database. Opens a new conversation when conversation_id is empty; model/provider/client_id are then required.",
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, args recordMessageArgs) (*sdk.CallToolResult, recordMessageOut, error) {
+		start := time.Now()
 		var convID uuid.UUID
 		if args.ConversationID != "" {
 			id, err := uuid.Parse(args.ConversationID)
 			if err != nil {
+				if agg != nil {
+					agg.RecordError("capture", time.Since(start))
+				}
 				return nil, recordMessageOut{}, fmt.Errorf("invalid conversation_id: %w", err)
 			}
 			convID = id
@@ -61,7 +69,13 @@ func registerRecordMessage(s *sdk.Server, st *store.Store) {
 			TokenCount:     args.TokenCount,
 		})
 		if err != nil {
+			if agg != nil {
+				agg.RecordError("capture", time.Since(start))
+			}
 			return nil, recordMessageOut{}, err
+		}
+		if agg != nil {
+			agg.RecordCapture(args.Model, args.ClientID, time.Since(start))
 		}
 		out := recordMessageOut{
 			MessageID:      res.MessageID.String(),
@@ -129,11 +143,17 @@ type searchHistoryOut struct {
 	Hits []searchHit `json:"hits"`
 }
 
-func registerSearchHistory(s *sdk.Server, st *store.Store) {
+func registerSearchHistory(s *sdk.Server, st *store.Store, agg *telemetry.Aggregator) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "search_history",
 		Description: "Search stored chat history for messages relevant to a query. Returns snippets packed to a token budget, one per conversation. MVP uses Postgres full-text ranking; semantic re-ranking via embeddings ships next.",
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, args searchHistoryArgs) (*sdk.CallToolResult, searchHistoryOut, error) {
+		start := time.Now()
+		recordErr := func() {
+			if agg != nil {
+				agg.RecordError("search", time.Since(start))
+			}
+		}
 		in := store.SearchHistoryIn{
 			Query:       args.Query,
 			TopK:        args.TopK,
@@ -144,6 +164,7 @@ func registerSearchHistory(s *sdk.Server, st *store.Store) {
 		if args.Since != "" {
 			t, err := time.Parse(time.RFC3339Nano, args.Since)
 			if err != nil {
+				recordErr()
 				return nil, searchHistoryOut{}, fmt.Errorf("invalid since: %w", err)
 			}
 			in.Since = &t
@@ -151,6 +172,7 @@ func registerSearchHistory(s *sdk.Server, st *store.Store) {
 		if args.Until != "" {
 			t, err := time.Parse(time.RFC3339Nano, args.Until)
 			if err != nil {
+				recordErr()
 				return nil, searchHistoryOut{}, fmt.Errorf("invalid until: %w", err)
 			}
 			in.Until = &t
@@ -158,6 +180,7 @@ func registerSearchHistory(s *sdk.Server, st *store.Store) {
 		for _, s := range args.ConversationIDs {
 			id, err := uuid.Parse(s)
 			if err != nil {
+				recordErr()
 				return nil, searchHistoryOut{}, fmt.Errorf("invalid conversation id %q: %w", s, err)
 			}
 			in.ConversationIDs = append(in.ConversationIDs, id)
@@ -165,7 +188,11 @@ func registerSearchHistory(s *sdk.Server, st *store.Store) {
 
 		res, err := st.SearchHistory(ctx, in)
 		if err != nil {
+			recordErr()
 			return nil, searchHistoryOut{}, err
+		}
+		if agg != nil {
+			agg.RecordSearch(time.Since(start))
 		}
 
 		out := searchHistoryOut{Hits: make([]searchHit, 0, len(res.Hits))}
@@ -207,19 +234,27 @@ func renderSearchHits(query string, hits []searchHit) string {
 	return b.String()
 }
 
-func registerGetConversation(s *sdk.Server, st *store.Store) {
+func registerGetConversation(s *sdk.Server, st *store.Store, agg *telemetry.Aggregator) {
 	sdk.AddTool(s, &sdk.Tool{
 		Name:        "get_conversation",
 		Description: "Fetch a conversation and its messages, ordered by creation time. Cursor-paginated via the after timestamp.",
 	}, func(ctx context.Context, _ *sdk.CallToolRequest, args getConversationArgs) (*sdk.CallToolResult, getConversationOut, error) {
+		start := time.Now()
+		recordErr := func() {
+			if agg != nil {
+				agg.RecordError("get", time.Since(start))
+			}
+		}
 		convID, err := uuid.Parse(args.ConversationID)
 		if err != nil {
+			recordErr()
 			return nil, getConversationOut{}, fmt.Errorf("invalid conversation_id: %w", err)
 		}
 		var after time.Time
 		if args.After != "" {
 			t, err := time.Parse(time.RFC3339Nano, args.After)
 			if err != nil {
+				recordErr()
 				return nil, getConversationOut{}, fmt.Errorf("invalid after: %w", err)
 			}
 			after = t
@@ -231,7 +266,11 @@ func registerGetConversation(s *sdk.Server, st *store.Store) {
 			Limit:          args.Limit,
 		})
 		if err != nil {
+			recordErr()
 			return nil, getConversationOut{}, err
+		}
+		if agg != nil {
+			agg.RecordGet(time.Since(start))
 		}
 
 		out := getConversationOut{

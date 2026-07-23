@@ -1,0 +1,22 @@
+name = "chatmem-ingest"
+main = "src/index.ts"
+compatibility_date = "2026-07-23"
+
+# One-shot setup:
+#   npx wrangler d1 create chatmem-telemetry
+#   # copy the printed database_id below
+#   npx wrangler d1 execute chatmem-telemetry --remote --file=schema.sql
+#   npx wrangler deploy
+#
+# The deploy URL becomes CHATMEM_TELEMETRY_URL for the chatmem client.
+[[d1_databases]]
+binding = "DB"
+database_name = "chatmem-telemetry"
+database_id = "REPLACE_ME_AFTER_wrangler_d1_create"
+
+# Keep observability + limits sensible for a tiny public ingest.
+[observability]
+enabled = true
+
+[limits]
+cpu_ms = 50

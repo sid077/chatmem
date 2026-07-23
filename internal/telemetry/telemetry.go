@@ -1,11 +1,9 @@
 package telemetry
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,40 +53,16 @@ func Load(dataHome string) (State, error) {
 	}
 }
 
+// ConfigExists reports whether a telemetry.json is present. Used by
+// `chatmem init` to decide whether this is a first run.
+func ConfigExists(dataHome string) bool {
+	_, err := os.Stat(filepath.Join(dataHome, configFile))
+	return err == nil
+}
+
 // SetEnabled writes the config file. Env var still wins on subsequent Load calls.
 func SetEnabled(dataHome string, enabled bool) error {
 	return writeConfig(dataHome, Config{Enabled: enabled})
-}
-
-type Client struct {
-	state State
-	log   *slog.Logger
-}
-
-func New(state State, log *slog.Logger) *Client {
-	return &Client{state: state, log: log}
-}
-
-type Ping struct {
-	Version  string
-	Captures int
-	Queries  int
-	Models   map[string]int
-}
-
-// Ping is a no-op in MVP — the ingest endpoint lands with the v1.0 telemetry
-// pipeline (Cloudflare Worker). The opt-out plumbing already works so the
-// user promise is honored: if Enabled is false, we do nothing here regardless.
-func (c *Client) Ping(_ context.Context, p Ping) {
-	if !c.state.Enabled {
-		return
-	}
-	c.log.Debug("telemetry ping (no sink yet in MVP)",
-		"install_id", c.state.InstallID,
-		"version", p.Version,
-		"captures", p.Captures,
-		"queries", p.Queries,
-		"models", p.Models)
 }
 
 func readOrCreateInstallID(dataHome string) (string, error) {

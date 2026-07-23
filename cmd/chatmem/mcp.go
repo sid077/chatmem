@@ -15,6 +15,7 @@ import (
 	chatmcp "github.com/sid077/chatmem/internal/mcp"
 	chatpg "github.com/sid077/chatmem/internal/pg"
 	"github.com/sid077/chatmem/internal/store"
+	"github.com/sid077/chatmem/internal/telemetry"
 )
 
 func newMCPCmd() *cobra.Command {
@@ -59,11 +60,19 @@ func runMCP(ctx context.Context, port uint32) error {
 	if err := st.EnsureSchema(ctx); err != nil {
 		return fmt.Errorf("schema: %w", err)
 	}
-	log.Info("mcp ready — serving stdio")
 
-	server := chatmcp.NewServer(st, version)
+	tstate, err := telemetry.Load(dataHome())
+	if err != nil {
+		return fmt.Errorf("load telemetry state: %w", err)
+	}
+	tclient := telemetry.NewClient(tstate, dataHome(), log, telemetry.Options{Version: version})
+	log.Info("telemetry", "enabled", tstate.Enabled, "source", tstate.Source)
 
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	tclient.Start(ctx) // final flush fires on ctx.Done()
+
+	log.Info("mcp ready — serving stdio")
+	server := chatmcp.NewServer(st, tclient.Aggregator(), version)
 	return server.Run(ctx, &sdk.StdioTransport{})
 }

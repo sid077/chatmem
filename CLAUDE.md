@@ -16,7 +16,8 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `internal/pg` | Embedded Postgres lifecycle + pgvector install. | `New(cfg)` → `Start(ctx)`, `Pool()`, `Stop()` |
 | `internal/store` | pgx-backed data access + schema. | `EnsureSchema`, `RecordMessage`, `SearchHistory`, `GetConversation` |
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
-| `internal/telemetry` | Install id + opt-out gate. | `Load(dataHome)`, `SetEnabled`, `Client.Ping` |
+| `internal/telemetry` | Install id + opt-out gate + in-process aggregator + flush loop. | `Load(dataHome)`, `SetEnabled`, `NewAggregator()`, `NewClient(state, dataHome, log, opts).Start(ctx)` |
+| `server/telemetry-worker` | Cloudflare Worker + D1 that receives `POST /v1/ping`. Deployed independently via `wrangler`. | `server/telemetry-worker/src/index.ts`, `schema.sql`, `wrangler.toml` |
 | `scripts/build-rpm-repo.sh` | Assembles a zypper/dnf-compatible repo tree from `dist/*.rpm`. Runs `createrepo_c` inside a `fedora:41` docker container so macOS hosts don't need it installed. Default `BASE_URL` = `https://sid077.github.io/chatmem`. | `scripts/build-rpm-repo.sh [BASE_URL]` |
 | `.github/workflows/release.yml` | Tag-triggered release: `goreleaser release --clean` → assemble RPM repo tree with `createrepo_c` (native, not docker, in CI) → push to `gh-pages` branch. | `git push origin vX.Y.Z` |
 
@@ -47,6 +48,8 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 12. **Homebrew distribution is a cask, not a formula.** `.goreleaser.yaml` uses `homebrew_casks:` because `brews:` was soft-deprecated in goreleaser v2.10. User-facing install command is `brew install --cask chatmem`. Cask files write to `homebrew-chatmem/Casks/chatmem.rb` (not `Formula/`).
 13. **macOS binary is unsigned as of v0.0.1** — Homebrew Cask stamps `com.apple.quarantine` on it and Gatekeeper kills first invocation. Documented workaround: `xattr -d com.apple.quarantine $(brew --prefix)/bin/chatmem`. Real fix requires Apple Developer ID + notarization; add a `signs:` block to `.goreleaser.yaml` with `AC_USERNAME` + team id secrets when we have them.
 14. **Every MCP tool must render its full return in `Content`, not just a summary.** Many MCP clients (Windsurf Cascade, some others) show `Content` to the LLM and ignore `StructuredContent`. If a tool only emits "N hits" or "N messages" in `Content`, the LLM sees nothing useful. The `renderSearchHits` and `renderConversation` helpers in `internal/mcp/server.go` are the pattern — copy them for any new query-style tool. `record_message` is exempt because its useful return IS the summary (write confirmation).
+15. **Telemetry payloads must never carry message content, query strings, filenames, or prompts.** The `internal/telemetry.Payload` shape is deliberately structural: counters, distributions, latency stats, install id, version. If someone adds a new field, prove it's non-PII before merging. The client is compiled with the assumption that anything in Payload is safe to persist to `<data>/pending/*.json` and POST to a public endpoint.
+16. **MCP tool handlers must guard `agg != nil` before calling Record*.** Tests pass `nil` for the aggregator to keep them fast + isolated; skipping the nil check would panic in `internal/mcp` tests.
 
 ## Platform support matrix
 

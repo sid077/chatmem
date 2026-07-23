@@ -243,15 +243,45 @@ Manage the anonymous telemetry setting. `status` prints the effective state, the
 
 ## Telemetry
 
-If enabled, `chatmem` sends anonymous pings (install id + aggregate counters + latency histograms) — **no message content ever leaves the machine**. The ingest endpoint is not live yet in MVP; the client honors opt-out immediately so nothing is transmitted regardless.
+`chatmem` can send anonymous usage pings to help track adoption. **Message content, query strings, and filenames are never sent, ever.** What *is* sent when enabled:
 
-Precedence (highest wins):
-1. `CHATMEM_TELEMETRY=0` (also accepts `false`, `off`)
-2. `<data>/telemetry.json` (`{"enabled": false}`)
-3. `chatmem telemetry disable`
-4. Default: enabled
+- **install UUID** (generated locally on first run, in `<data>/install_id`)
+- `chatmem` version
+- **counters** for the flush window (default 5 minutes): captures, searches, gets, errors
+- **model + client distributions** — e.g. `{"claude-opus-4-7": 12, "gpt-5": 4}`, `{"windsurf": 8, "cursor": 8}`
+- **latency percentiles** per operation — p50/p95/p99 in ms
 
-Check current state: `chatmem telemetry status`.
+### Modes
+
+The client operates in three modes depending on config:
+
+| Mode | Behavior |
+|------|----------|
+| **Disabled** (env or config) | Nothing accumulated. `Aggregator.Record*` still runs but `Flush` is a no-op. |
+| **Enabled, no ingest URL** | Accumulate + periodic flush → `slog.Info("telemetry flush (local-only, no ingest URL set)", ...)`. Local observability only. |
+| **Enabled, `CHATMEM_TELEMETRY_URL` set** | Accumulate + flush → POST to `<URL>/v1/ping` with 3-attempt exponential backoff. Failed sends persist to `<data>/pending/*.json` and get drained on the next successful flush (24h TTL). |
+
+### Precedence (highest wins)
+
+1. `CHATMEM_TELEMETRY=0` (also `false`, `off`) — hard off
+2. `<data>/telemetry.json` (`{"enabled": true|false}`) — persistent choice
+3. `chatmem telemetry {enable|disable}` — writes the above
+4. Default: **enabled**
+
+`chatmem init` prompts on first run (interactive TTY only) and writes the config. Non-TTY inits print a notice and leave the default; opt out non-interactively with `chatmem telemetry disable` or the env var.
+
+### Commands
+
+```bash
+chatmem telemetry status     # current state + source + ingest URL
+chatmem telemetry enable     # persist enabled = true
+chatmem telemetry disable    # persist enabled = false
+chatmem telemetry dump       # list <data>/pending/*.json (unshipped pings)
+```
+
+### Standing up your own ingest
+
+The client posts to any endpoint that speaks `POST /v1/ping` with the payload documented in `internal/telemetry/client.go:Payload`. A ready-to-deploy Cloudflare Worker + D1 lives in [`server/telemetry-worker/`](./server/telemetry-worker/) — one `wrangler deploy` and you have an endpoint. See [that README](./server/telemetry-worker/README.md) for the 5-command setup.
 
 ## Architecture
 
@@ -297,6 +327,10 @@ chatmem/
 │   │       ├── darwin_arm64/vector.dylib + extension/{vector.control,vector--0.8.5.sql}
 │   │       ├── linux_amd64/vector.so     + extension/{vector.control,vector--0.8.3.sql}
 │   │       └── linux_arm64/vector.so     + extension/{vector.control,vector--0.8.3.sql}
+│   ├── telemetry/
+│   │   ├── telemetry.go        # State/Config, install_id, opt-out precedence
+│   │   ├── aggregator.go       # Thread-safe counters + latency reservoir + percentiles
+│   │   └── client.go           # Flush loop, HTTP POST with retry, local pending dir
 │   ├── store/                  # schema + pgx-backed data access
 │   │   ├── schema.sql
 │   │   ├── store.go            # EnsureSchema, RecordMessage, SearchHistory, GetConversation
@@ -306,6 +340,7 @@ chatmem/
 │   │   └── server_test.go      # in-process MCP round-trip
 │   └── telemetry/              # install_id + opt-out gate
 │       └── telemetry.go
+├── server/telemetry-worker/    # Cloudflare Worker + D1 for the telemetry ingest
 ├── .goreleaser.yaml            # cross-platform build + Homebrew tap + rpm/deb via nfpm
 ├── .github/workflows/release.yml  # tag push → goreleaser + gh-pages RPM repo publish
 ├── scripts/build-rpm-repo.sh   # assemble zypper/dnf repo tree locally (uses createrepo_c via docker)

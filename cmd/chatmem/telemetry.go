@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -49,6 +51,40 @@ func newTelemetryCmd() *cobra.Command {
 					state = "enabled"
 				}
 				fmt.Printf("telemetry: %s (source: %s)\ninstall_id: %s\n", state, st.Source, st.InstallID)
+				if url := os.Getenv("CHATMEM_TELEMETRY_URL"); url != "" {
+					fmt.Printf("ingest_url: %s (from CHATMEM_TELEMETRY_URL)\n", url)
+				} else {
+					fmt.Println("ingest_url: (unset — pings are collected locally but not shipped)")
+				}
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "dump",
+			Short: "List pending telemetry payloads (unshipped pings) with their sizes",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				st, err := telemetry.Load(dataHome())
+				if err != nil {
+					return err
+				}
+				log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+				client := telemetry.NewClient(st, dataHome(), log, telemetry.Options{Version: version})
+				files, err := client.PendingFiles()
+				if err != nil {
+					return err
+				}
+				if len(files) == 0 {
+					fmt.Println("no pending telemetry payloads")
+					return nil
+				}
+				for _, f := range files {
+					fi, err := os.Stat(f)
+					if err != nil {
+						fmt.Printf("  %s  (stat error: %v)\n", f, err)
+						continue
+					}
+					fmt.Printf("  %s  %d bytes  %s\n", f, fi.Size(), fi.ModTime().Format("2006-01-02 15:04:05"))
+				}
 				return nil
 			},
 		},
