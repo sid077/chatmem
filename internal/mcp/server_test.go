@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,6 +129,46 @@ func TestMCPServerRoundTrip(t *testing.T) {
 	if fetched.Messages[0].Role != "user" || fetched.Messages[0].Content != "hello from mcp" {
 		t.Fatalf("unexpected message: %+v", fetched.Messages[0])
 	}
+
+	// The visible Content field must include the message text — otherwise MCP
+	// clients that don't surface structured content (e.g. Windsurf Cascade)
+	// see only a summary and can't act on the result.
+	getText := firstText(call2.Content)
+	for _, want := range []string{"hello from mcp", "user", recorded.ConversationID} {
+		if !strings.Contains(getText, want) {
+			t.Fatalf("get_conversation Content missing %q\n---\n%s", want, getText)
+		}
+	}
+
+	// Now: search_history must also include the snippet in Content.
+	call3, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "search_history",
+		Arguments: map[string]any{
+			"query":  "hello mcp",
+			"top_k":  5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("search_history: %v", err)
+	}
+	if call3.IsError {
+		t.Fatalf("search_history returned error: %+v", call3.Content)
+	}
+	searchText := firstText(call3.Content)
+	for _, want := range []string{"hello from mcp", "hit", "snippet:"} {
+		if !strings.Contains(searchText, want) {
+			t.Fatalf("search_history Content missing %q\n---\n%s", want, searchText)
+		}
+	}
+}
+
+func firstText(cs []sdk.Content) string {
+	for _, c := range cs {
+		if t, ok := c.(*sdk.TextContent); ok {
+			return t.Text
+		}
+	}
+	return ""
 }
 
 func remarshal(src any, dst any) error {

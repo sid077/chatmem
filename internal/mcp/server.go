@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -179,11 +180,31 @@ func registerSearchHistory(s *sdk.Server, st *store.Store) {
 			})
 		}
 		return &sdk.CallToolResult{
-			Content: []sdk.Content{&sdk.TextContent{
-				Text: fmt.Sprintf("%d hit(s) for %q", len(out.Hits), args.Query),
-			}},
+			Content: []sdk.Content{&sdk.TextContent{Text: renderSearchHits(args.Query, out.Hits)}},
 		}, out, nil
 	})
+}
+
+func renderSearchHits(query string, hits []searchHit) string {
+	if len(hits) == 0 {
+		return fmt.Sprintf("No hits for %q. Try broader terms or drop filters.", query)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d hit(s) for %q\n", len(hits), query)
+	for i, h := range hits {
+		fmt.Fprintf(&b, "\n── hit %d ──\n", i+1)
+		fmt.Fprintf(&b, "role:         %s\n", h.Role)
+		fmt.Fprintf(&b, "conversation: %s\n", h.ConversationID)
+		fmt.Fprintf(&b, "message:      %s\n", h.MessageID)
+		fmt.Fprintf(&b, "created:      %s\n", h.CreatedAt.Format(time.RFC3339))
+		fmt.Fprintf(&b, "score:        %.4f\n", h.Score)
+		b.WriteString("snippet:\n")
+		b.WriteString(h.Snippet)
+		if !strings.HasSuffix(h.Snippet, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 func registerGetConversation(s *sdk.Server, st *store.Store) {
@@ -240,9 +261,29 @@ func registerGetConversation(s *sdk.Server, st *store.Store) {
 		}
 
 		return &sdk.CallToolResult{
-			Content: []sdk.Content{&sdk.TextContent{
-				Text: fmt.Sprintf("conversation %s: %d message(s)", out.Conversation.ID, len(out.Messages)),
-			}},
+			Content: []sdk.Content{&sdk.TextContent{Text: renderConversation(out)}},
 		}, out, nil
 	})
+}
+
+func renderConversation(out getConversationOut) string {
+	var b strings.Builder
+	c := out.Conversation
+	fmt.Fprintf(&b, "conversation %s\n", c.ID)
+	fmt.Fprintf(&b, "model:    %s / %s\n", c.Provider, c.Model)
+	fmt.Fprintf(&b, "client:   %s\n", c.ClientID)
+	fmt.Fprintf(&b, "started:  %s\n", c.StartedAt.Format(time.RFC3339))
+	fmt.Fprintf(&b, "updated:  %s\n", c.UpdatedAt.Format(time.RFC3339))
+	fmt.Fprintf(&b, "messages: %d\n", len(out.Messages))
+	for _, m := range out.Messages {
+		fmt.Fprintf(&b, "\n── %s @ %s ──\n", m.Role, m.CreatedAt.Format(time.RFC3339))
+		b.WriteString(m.Content)
+		if !strings.HasSuffix(m.Content, "\n") {
+			b.WriteByte('\n')
+		}
+	}
+	if out.NextAfter != nil {
+		fmt.Fprintf(&b, "\n(more available; pass after=%s to continue)\n", *out.NextAfter)
+	}
+	return b.String()
 }

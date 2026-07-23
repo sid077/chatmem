@@ -136,21 +136,33 @@ Search stored chat history. **MVP uses Postgres full-text ranking** (`to_tsvecto
 | `until` | RFC3339 string | no | Upper bound on `created_at` |
 | `conversation_ids` | array of UUIDs | no | Restrict to these conversations |
 
-Returns:
+Returns both a rendered text block (visible to any MCP client) and a structured payload for programmatic use:
+
+Rendered text (`Content`):
+```
+2 hit(s) for "kafka retention"
+
+── hit 1 ──
+role:         user
+conversation: 8a2f…
+message:      def6…
+created:      2026-07-20T10:15:32Z
+score:        0.2341
+snippet:
+kafka retention is set at 7 days for the ingest topic…
+```
+
+Structured (`StructuredContent`):
 ```json
 {
   "hits": [
-    {
-      "message_id": "<uuid>",
-      "conversation_id": "<uuid>",
-      "role": "user",
-      "snippet": "...",
-      "score": 0.147,
-      "created_at": "2026-07-18T20:38:00Z"
-    }
+    { "message_id": "<uuid>", "conversation_id": "<uuid>", "role": "user",
+      "snippet": "...", "score": 0.147, "created_at": "2026-07-20T10:15:32Z" }
   ]
 }
 ```
+
+(Before v0.0.2 `Content` was a bare hit count — Windsurf/Cascade and any client that ignores `StructuredContent` would show no snippet text.)
 
 ### `get_conversation`
 
@@ -162,7 +174,25 @@ Fetch a conversation and its messages, ordered by `created_at` ascending. Cursor
 | `limit` | int | no | Default 100, max 500 |
 | `after` | RFC3339 string | no | Return messages strictly after this timestamp |
 
-Returns:
+Returns both a rendered text block and a structured payload.
+
+Rendered text (`Content`):
+```
+conversation 8a2f…
+model:    anthropic / claude-opus-4-7
+client:   claude-code
+started:  2026-07-20T10:15:32Z
+updated:  2026-07-20T10:20:15Z
+messages: 3
+
+── user @ 2026-07-20T10:15:32Z ──
+hello from chatmem
+
+── assistant @ 2026-07-20T10:15:35Z ──
+hi back
+```
+
+Structured (`StructuredContent`):
 ```json
 {
   "conversation": {
