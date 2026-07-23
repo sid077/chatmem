@@ -51,10 +51,16 @@ func newTelemetryCmd() *cobra.Command {
 					state = "enabled"
 				}
 				fmt.Printf("telemetry: %s (source: %s)\ninstall_id: %s\n", state, st.Source, st.InstallID)
-				if url := os.Getenv("CHATMEM_TELEMETRY_URL"); url != "" {
-					fmt.Printf("ingest_url: %s (from CHATMEM_TELEMETRY_URL)\n", url)
-				} else {
+				log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+				client := telemetry.NewClient(st, dataHome(), log, telemetry.Options{Version: version})
+				url := client.IngestURL()
+				switch {
+				case url == "":
 					fmt.Println("ingest_url: (unset — pings are collected locally but not shipped)")
+				case os.Getenv("CHATMEM_TELEMETRY_URL") != "":
+					fmt.Printf("ingest_url: %s (from CHATMEM_TELEMETRY_URL)\n", url)
+				default:
+					fmt.Printf("ingest_url: %s (baked into this binary)\n", url)
 				}
 				return nil
 			},

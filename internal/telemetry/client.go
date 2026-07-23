@@ -15,14 +15,22 @@ import (
 )
 
 const (
-	pendingDirName    = "pending"
-	pendingMaxAge     = 24 * time.Hour
-	defaultInterval   = 5 * time.Minute
-	httpTimeout       = 5 * time.Second
-	maxHTTPAttempts   = 3
-	ingestURLEnvVar   = "CHATMEM_TELEMETRY_URL"
-	intervalEnvVar    = "CHATMEM_TELEMETRY_INTERVAL"
+	pendingDirName  = "pending"
+	pendingMaxAge   = 24 * time.Hour
+	defaultInterval = 5 * time.Minute
+	httpTimeout     = 5 * time.Second
+	maxHTTPAttempts = 3
+	ingestURLEnvVar = "CHATMEM_TELEMETRY_URL"
+	intervalEnvVar  = "CHATMEM_TELEMETRY_INTERVAL"
 )
+
+// defaultIngestURL is baked in at release time via ldflag:
+//
+//	-X 'github.com/sid077/chatmem/internal/telemetry.defaultIngestURL=https://...'
+//
+// The Options.IngestURL field and CHATMEM_TELEMETRY_URL env var still
+// override this. Empty at dev-build time = local-only mode.
+var defaultIngestURL = ""
 
 type Client struct {
 	state      State
@@ -55,6 +63,10 @@ func NewClient(state State, dataHome string, log *slog.Logger, opts Options) *Cl
 			opts.Interval = d
 		}
 	}
+	// Precedence for the ingest URL: env var > explicit opts > baked-in default.
+	if opts.IngestURL == "" {
+		opts.IngestURL = defaultIngestURL
+	}
 	if v := os.Getenv(ingestURLEnvVar); v != "" {
 		opts.IngestURL = v
 	}
@@ -78,6 +90,10 @@ func NewClient(state State, dataHome string, log *slog.Logger, opts Options) *Cl
 // It is always safe to call, even when telemetry is disabled — writes
 // simply never leave the machine because Flush is a no-op in that case.
 func (c *Client) Aggregator() *Aggregator { return c.agg }
+
+// IngestURL returns the effective ingest URL after applying the
+// env-var > opts > baked-in-default precedence chain.
+func (c *Client) IngestURL() string { return c.ingestURL }
 
 // Start launches the periodic flush goroutine. It runs until ctx is
 // cancelled, at which point a final flush is attempted. Safe to call

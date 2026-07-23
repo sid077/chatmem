@@ -12,11 +12,9 @@ compatibility_date = "2026-07-23"
 [[d1_databases]]
 binding = "DB"
 database_name = "chatmem-telemetry"
-database_id = "REPLACE_ME_AFTER_wrangler_d1_create"
+database_id = "5b08c292-04be-4066-88e4-77811b3fdc04"
 
-# Keep observability + limits sensible for a tiny public ingest.
+# Keep observability on for a tiny public ingest. CPU limits are
+# a paid-plan feature; the free tier's default 10ms is enough for the insert.
 [observability]
 enabled = true
-
-[limits]
-cpu_ms = 50

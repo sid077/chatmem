@@ -259,7 +259,7 @@ The client operates in three modes depending on config:
 |------|----------|
 | **Disabled** (env or config) | Nothing accumulated. `Aggregator.Record*` still runs but `Flush` is a no-op. |
 | **Enabled, no ingest URL** | Accumulate + periodic flush → `slog.Info("telemetry flush (local-only, no ingest URL set)", ...)`. Local observability only. |
-| **Enabled, `CHATMEM_TELEMETRY_URL` set** | Accumulate + flush → POST to `<URL>/v1/ping` with 3-attempt exponential backoff. Failed sends persist to `<data>/pending/*.json` and get drained on the next successful flush (24h TTL). |
+| **Enabled, ingest URL set** | Accumulate + flush → POST to `<URL>/v1/ping` with 3-attempt exponential backoff. Failed sends persist to `<data>/pending/*.json` and get drained on the next successful flush (24h TTL). Release binaries have this URL **baked in** (points at the maintainer's Worker); `CHATMEM_TELEMETRY_URL` overrides it, and `chatmem telemetry status` prints the effective value. |
 
 ### Precedence (highest wins)
 
