@@ -27,7 +27,7 @@ own search, PulseMCP's crawler. No further action.
 | `wong2/awesome-mcp-servers` — via https://mcpservers.org/submit | ⏳ web form; wong2 doesn't accept PRs | https://mcpservers.org/submit |
 | Smithery | ❌ skipped — see note below | — |
 | Official MCP registry (registry.modelcontextprotocol.io) | ❌ skipped for v0.1.x — see note below | — |
-| PulseMCP | ⏳ needs user form submission | https://www.pulsemcp.com/submit |
+| PulseMCP | ❌ blocked on official MCP registry publish (they auto-ingest from registry.modelcontextprotocol.io weekly; no direct submissions) | — |
 | Glama | ⏳ auto-indexed via GitHub topics (24h) | check https://glama.ai/mcp/servers/sid077/chatmem |
 | `.well-known/mcp/server-card.json` | ✅ served on gh-pages, kept in sync by release workflow | https://sid077.github.io/chatmem/.well-known/mcp/server-card.json |
 
@@ -138,20 +138,22 @@ starts working and users get a one-click install button on
 
 ---
 
-## 5. PulseMCP — https://www.pulsemcp.com/submit
+## 5. PulseMCP
 
-Form-based. Fill in:
+**Status (2026-07-24):** PulseMCP no longer takes direct submissions. From
+their submit page: *"We ingest entries from the Official MCP Registry daily
+and process them weekly. If it has been a week since you published there,
+or want to make other adjustments to your listing on pulsemcp.com, please
+email us at hello@pulsemcp.com"*.
 
-- **Name:** chatmem
-- **GitHub URL:** https://github.com/sid077/chatmem
-- **Category:** Memory / Knowledge Management
-- **Description (short):** Local LLM chat history served over MCP. Embedded Postgres + pgvector on your own machine, no data ever leaves.
-- **Description (long):** paste the "What it is" paragraph from step 2.
-- **Install command:** `brew install --cask sid077/chatmem/chatmem` (mac) / `sudo zypper ar https://sid077.github.io/chatmem/chatmem.repo && sudo zypper in chatmem` (opensuse) / see releases for other distros
-- **License:** Apache-2.0
-- **Author / contact:** siddhant.d777@gmail.com
+Chatmem is blocked here on the same reason as Smithery + the official
+registry: no native-binary package type. Re-attempt path is identical to
+Smithery (see step 4 note): ship an MCPB package or npm wrapper, publish
+to registry.modelcontextprotocol.io, PulseMCP picks it up on the next
+weekly ingest.
 
-Editorial review — usually 2–5 days to appear.
+Manual editorial contact (`hello@pulsemcp.com`) is available for edits
+if we ever do get listed.
 
 ---
 
