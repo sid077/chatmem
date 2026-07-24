@@ -24,7 +24,7 @@ own search, PulseMCP's crawler. No further action.
 |-----------|--------|------|
 | GitHub topics | ✅ set on `sid077/chatmem` | — |
 | `punkpeye/awesome-mcp-servers` PR | ✅ open | https://github.com/punkpeye/awesome-mcp-servers/pull/10819 |
-| `wong2/awesome-mcp-servers` PR | ⚠️ branch pushed, click compare URL to open | https://github.com/wong2/awesome-mcp-servers/compare/main...sid077:awesome-mcp-servers-wong2:add-chatmem?expand=1 |
+| `wong2/awesome-mcp-servers` — via https://mcpservers.org/submit | ⏳ web form; wong2 doesn't accept PRs | https://mcpservers.org/submit |
 | Smithery | ❌ skipped — see note below | — |
 | Official MCP registry (registry.modelcontextprotocol.io) | ❌ skipped for v0.1.x — see note below | — |
 | PulseMCP | ⏳ needs user form submission | https://www.pulsemcp.com/submit |
@@ -93,20 +93,22 @@ each GitHub Release. macOS arm64 + Linux amd64/arm64 verified end-to-end.
 
 ---
 
-## 3. `wong2/awesome-mcp-servers` — same entry, different repo
+## 3. `wong2/awesome-mcp-servers` — submit via https://mcpservers.org/submit
 
-```bash
-gh repo fork wong2/awesome-mcp-servers --clone --remote
-```
+**Note (2026-07-24):** wong2 disabled PRs and routes all submissions to the
+mcpservers.org web form. A leftover fork/branch exists at
+`sid077/awesome-mcp-servers-wong2:add-chatmem` — harmless, ignore.
 
-That list uses a slightly simpler format (no OS icons); use this line
-(check the target section first — usually "Databases" or "Memory"):
+Fill in the form at https://mcpservers.org/submit:
 
-```markdown
-- [chatmem](https://github.com/sid077/chatmem) - Local LLM chat history served over MCP. Embedded Postgres + pgvector, cross-tool memory, everything stays on your machine.
-```
+- **Server Name:** `chatmem`
+- **Short Description:** `Local LLM chat history served over MCP. Embedded Postgres + pgvector, cross-tool memory, everything stays on your machine.`
+- **Link:** `https://github.com/sid077/chatmem`
+- **Category:** `Knowledge & Memory` (or the closest option)
+- **Contact Email:** your email
 
-Same PR title + body as above.
+Submit. Approval typically shows up in the wong2 list + mcpservers.org
+directory within a few days.
 
 ---
 
