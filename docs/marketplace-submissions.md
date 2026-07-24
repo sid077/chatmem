@@ -18,6 +18,19 @@ own search, PulseMCP's crawler. No further action.
 
 ---
 
+## Status snapshot (2026-07-24)
+
+| Directory | Status | Link |
+|-----------|--------|------|
+| GitHub topics | ✅ set on `sid077/chatmem` | — |
+| `punkpeye/awesome-mcp-servers` PR | ✅ open | https://github.com/punkpeye/awesome-mcp-servers/pull/10819 |
+| `wong2/awesome-mcp-servers` PR | ⚠️ branch pushed, click compare URL to open | https://github.com/wong2/awesome-mcp-servers/compare/main...sid077:awesome-mcp-servers-wong2:add-chatmem?expand=1 |
+| Smithery | ⏳ needs user OAuth submission | https://smithery.ai/new |
+| PulseMCP | ⏳ needs user form submission | https://www.pulsemcp.com/submit |
+| Glama | ⏳ auto-indexed via GitHub topics (24h) | check https://glama.ai/mcp/servers/sid077/chatmem |
+
+---
+
 ## 2. `punkpeye/awesome-mcp-servers` — Knowledge & Memory section
 
 Fork → edit → PR.
