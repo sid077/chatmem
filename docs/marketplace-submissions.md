@@ -25,9 +25,24 @@ own search, PulseMCP's crawler. No further action.
 | GitHub topics | ✅ set on `sid077/chatmem` | — |
 | `punkpeye/awesome-mcp-servers` PR | ✅ open | https://github.com/punkpeye/awesome-mcp-servers/pull/10819 |
 | `wong2/awesome-mcp-servers` PR | ⚠️ branch pushed, click compare URL to open | https://github.com/wong2/awesome-mcp-servers/compare/main...sid077:awesome-mcp-servers-wong2:add-chatmem?expand=1 |
-| Smithery | ⏳ needs user OAuth submission | https://smithery.ai/new |
+| Smithery | ❌ skipped — see note below | — |
+| Official MCP registry (registry.modelcontextprotocol.io) | ❌ skipped for v0.1.x — see note below | — |
 | PulseMCP | ⏳ needs user form submission | https://www.pulsemcp.com/submit |
 | Glama | ⏳ auto-indexed via GitHub topics (24h) | check https://glama.ai/mcp/servers/sid077/chatmem |
+| `.well-known/mcp/server-card.json` | ✅ served on gh-pages, kept in sync by release workflow | https://sid077.github.io/chatmem/.well-known/mcp/server-card.json |
+
+### Why Smithery + official registry are skipped
+
+Both registries currently register servers by either **hosting them** (HTTP MCP URL) or **spawning a package** in their sandbox (`npx`, `uvx`, `dnx`, `cargo install`, OCI pull, or MCPB download). chatmem ships as a **native binary via `brew` / `zypper` / `dnf` / `apt`**, which is a first-class distribution model for local-first CLIs but is not a first-class package type for either registry today.
+
+Re-attempt when *any* of:
+
+- Smithery adds registration for stdio + user-installed binaries with a server-card URL as the metadata source.
+- The official registry adds a `registryType: brew | apt | rpm` package type — being tracked in `modelcontextprotocol/registry` issues.
+- We ship a thin npm/pip wrapper (`@sid077/chatmem-mcp`) that downloads and execs the native binary. Registry then classifies us as npm/pypi. This is ~30 lines of JS but adds a permanent maintenance surface — worth doing only if the awesome-mcp / Glama / direct-install traffic clearly isn't enough.
+- We ship an OCI image via GHCR. Contradicts "local Postgres per user" without a volume mount ceremony; not recommended for chatmem specifically.
+
+For now the intended discovery path is: awesome-mcp lists → GitHub repo → README → `brew install --cask` / `zypper in`. Real users find and install chatmem the same way they find any modern CLI tool.
 
 ---
 

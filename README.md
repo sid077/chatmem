@@ -4,7 +4,6 @@
 [![GitHub Downloads](https://img.shields.io/github/downloads/sid077/chatmem/total?color=blue)](https://github.com/sid077/chatmem/releases)
 [![License](https://img.shields.io/badge/license-Apache_2.0-blue)](./LICENSE)
 [![Go 1.26+](https://img.shields.io/badge/go-1.26+-00add8?logo=go&logoColor=white)](https://go.dev/)
-[![smithery badge](https://smithery.ai/badge/@sid077/chatmem)](https://smithery.ai/server/@sid077/chatmem)
 
 **Local LLM chat history, served over MCP.**
 

@@ -1,10 +1,18 @@
 # Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
 #
-# chatmem is a locally-installed binary (brew cask / zypper / dnf / apt /
-# tarball) that runs its own embedded Postgres per-user. Smithery lists it
-# in the registry and hands the client the exact stdio command to spawn.
-# Users install the binary themselves — Smithery does NOT host chatmem
-# because the whole point of chatmem is that data stays on the user's disk.
+# STATUS (2026-07-24): Smithery's current submission flow expects either a
+# hosted HTTP MCP URL or an npm/pip package they can spawn in their sandbox.
+# chatmem is a native binary installed via brew / zypper / dnf / apt with a
+# per-user embedded Postgres, so neither shape fits — we cannot be registered
+# on Smithery today. See docs/marketplace-submissions.md for the current plan.
+#
+# This yaml is kept in the repo so that when Smithery adds registration for
+# stdio + native-binary MCP servers (or when we ship an npm wrapper), we
+# already have the config ready. Also useful as a reference for any MCP
+# tooling that grew to consume the smithery.yaml format.
+#
+# For the tool schemas Smithery would want, see .well-known/mcp/server-card.json
+# which is what other MCP registries and clients can consume today.
 
 startCommand:
   type: stdio
