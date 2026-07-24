@@ -97,12 +97,21 @@ Same PR title + body as above.
 
 ## 4. Smithery — https://smithery.ai/new
 
-Once the PR at step 2 is merged AND `smithery.yaml` is in the repo root
-(it is — see `/smithery.yaml`), submit at https://smithery.ai/new:
+Smithery auto-scans by spawning the server, which doesn't work for a
+locally-installed binary like chatmem. Instead we advertise a
+`.well-known/mcp/server-card.json` on our GitHub Pages so Smithery
+reads the tool schemas from there.
+
+**The server-card is already live** at
+https://sid077.github.io/chatmem/.well-known/mcp/server-card.json
+and the release workflow keeps it in sync on every tag push.
+
+Submission steps at https://smithery.ai/new:
 
 1. Sign in with GitHub.
 2. Paste `https://github.com/sid077/chatmem` as the repo URL.
-3. Smithery auto-detects `smithery.yaml`. Accept the auto-filled fields.
+3. If Smithery still errors on the auto-scan, explicitly point it at the
+   card URL above (some flows accept a "server card URL" override).
 4. Category: **Memory / Knowledge**. Tags: `memory`, `local`, `postgres`, `pgvector`.
 5. Submit.
 

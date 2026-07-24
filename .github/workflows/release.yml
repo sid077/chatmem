@@ -62,6 +62,10 @@ jobs:
           gpgcheck=0
           type=rpm-md
           REPO
+          # Publish the MCP server-card so Smithery + the official MCP
+          # registry can discover our tools without spawning the binary.
+          mkdir -p "$OUT/.well-known/mcp"
+          cp .well-known/mcp/server-card.json "$OUT/.well-known/mcp/server-card.json"
           # Minimal landing page so people who load the base URL in a browser
           # get a helpful pointer instead of a 404.
           cat > "$OUT/index.html" <<HTML

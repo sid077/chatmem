@@ -1,0 +1,164 @@
+{
+  "name": "chatmem",
+  "description": "Local LLM chat history served over MCP. Captures conversations from any MCP client (Claude Code, Cursor, Windsurf, aider) into an embedded Postgres 18 + pgvector database on the user's own machine, then serves relevant snippets back via search_history. Message content never leaves the machine — only anonymous usage counters do, and those can be disabled.",
+  "version": "0.1.1",
+  "serverInfo": {
+    "name": "chatmem",
+    "version": "0.1.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sid077/chatmem"
+  },
+  "homepage": "https://github.com/sid077/chatmem",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Siddhant Dubey",
+    "email": "siddhant.d777@gmail.com",
+    "url": "https://github.com/sid077"
+  },
+  "categories": ["memory", "knowledge", "local", "postgres", "pgvector"],
+  "transport": "stdio",
+  "runtime": {
+    "type": "stdio",
+    "command": "chatmem",
+    "args": ["mcp"]
+  },
+  "installation": {
+    "brew": "brew tap sid077/chatmem && brew install --cask chatmem",
+    "zypper": "sudo zypper ar https://sid077.github.io/chatmem/chatmem.repo && sudo zypper in chatmem",
+    "dnf": "sudo dnf config-manager --add-repo https://sid077.github.io/chatmem/chatmem.repo && sudo dnf install chatmem",
+    "deb": "curl -sSLo /tmp/chatmem.deb https://github.com/sid077/chatmem/releases/latest/download/chatmem_0.1.1_$(dpkg --print-architecture).deb && sudo apt install /tmp/chatmem.deb",
+    "releases": "https://github.com/sid077/chatmem/releases"
+  },
+  "postInstall": "chatmem init",
+  "capabilities": {
+    "tools": true,
+    "resources": false,
+    "prompts": false
+  },
+  "authentication": "none",
+  "tools": [
+    {
+      "name": "record_message",
+      "description": "Store a single chat message in the local chatmem database. Opens a new conversation when conversation_id is empty; model/provider/client_id are then required.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "description": "UUID of existing conversation; omit to open a new one"
+          },
+          "role": {
+            "type": "string",
+            "description": "user | assistant | system | tool"
+          },
+          "content": {
+            "type": "string",
+            "description": "message text"
+          },
+          "model": {
+            "type": "string",
+            "description": "model id, e.g. claude-opus-4-7 (required when opening a new conversation)"
+          },
+          "provider": {
+            "type": "string",
+            "description": "provider, e.g. anthropic (required when opening a new conversation)"
+          },
+          "client_id": {
+            "type": "string",
+            "description": "client id, e.g. claude-code, cursor, windsurf, aider (required when opening a new conversation)"
+          },
+          "token_count": {
+            "type": "integer",
+            "description": "optional token count for the message"
+          }
+        },
+        "required": ["role", "content"]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "readOnlyHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "search_history",
+      "description": "Search stored chat history for messages relevant to a query. Returns snippets packed to a token budget, one per conversation. MVP uses Postgres full-text ranking; semantic re-ranking via embeddings ships next.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "free-text query"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "max hits (default 10, max 100)"
+          },
+          "token_budget": {
+            "type": "integer",
+            "description": "total snippet tokens to return (default 4000)"
+          },
+          "model": {
+            "type": "string",
+            "description": "filter by model id"
+          },
+          "client_id": {
+            "type": "string",
+            "description": "filter by client id (e.g. claude-code, cursor)"
+          },
+          "since": {
+            "type": "string",
+            "description": "RFC3339 lower bound on message creation time"
+          },
+          "until": {
+            "type": "string",
+            "description": "RFC3339 upper bound on message creation time"
+          },
+          "conversation_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "restrict to these conversation UUIDs"
+          }
+        },
+        "required": ["query"]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_conversation",
+      "description": "Fetch a conversation and its messages, ordered by creation time. Cursor-paginated via the after timestamp.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "description": "UUID of the conversation"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "max messages to return (default 100, max 500)"
+          },
+          "after": {
+            "type": "string",
+            "description": "RFC3339 timestamp cursor; return messages strictly after this"
+          }
+        },
+        "required": ["conversation_id"]
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

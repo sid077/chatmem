@@ -20,6 +20,7 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `server/telemetry-worker` | Cloudflare Worker + D1 that receives `POST /v1/ping`. Deployed independently via `wrangler`. | `server/telemetry-worker/src/index.ts`, `schema.sql`, `wrangler.toml` |
 | `smithery.yaml` | Smithery registry config. `startCommand.commandFunction` maps optional `config.port` to `chatmem mcp --port <n>` (stdio transport). Users install the binary themselves — Smithery does not host it. | Root `smithery.yaml` |
 | `docs/marketplace-submissions.md` | Playbook for getting listed on awesome-mcp-servers, Smithery, PulseMCP, Glama. Keep updated as marketplaces evolve. | `docs/marketplace-submissions.md` |
+| `.well-known/mcp/server-card.json` | MCP server-card advertising the tool schemas without needing to spawn the binary. Copied into gh-pages by the release workflow. Consumed by Smithery (locally-installed binaries can't be auto-scanned) and the official MCP registry. Update alongside `internal/mcp/server.go` when tools change. | `.well-known/mcp/server-card.json` |
 | `scripts/build-rpm-repo.sh` | Assembles a zypper/dnf-compatible repo tree from `dist/*.rpm`. Runs `createrepo_c` inside a `fedora:41` docker container so macOS hosts don't need it installed. Default `BASE_URL` = `https://sid077.github.io/chatmem`. | `scripts/build-rpm-repo.sh [BASE_URL]` |
 | `.github/workflows/release.yml` | Tag-triggered release: `goreleaser release --clean` → assemble RPM repo tree with `createrepo_c` (native, not docker, in CI) → push to `gh-pages` branch. | `git push origin vX.Y.Z` |
 
@@ -53,6 +54,7 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 15. **Telemetry payloads must never carry message content, query strings, filenames, or prompts.** The `internal/telemetry.Payload` shape is deliberately structural: counters, distributions, latency stats, install id, version. If someone adds a new field, prove it's non-PII before merging. The client is compiled with the assumption that anything in Payload is safe to persist to `<data>/pending/*.json` and POST to a public endpoint.
 16. **MCP tool handlers must guard `agg != nil` before calling Record*.** Tests pass `nil` for the aggregator to keep them fast + isolated; skipping the nil check would panic in `internal/mcp` tests.
 17. **The telemetry ingest URL is baked into release binaries via `-ldflags -X`** targeting `internal/telemetry.defaultIngestURL`. The literal string lives in `.goreleaser.yaml` (public info — the endpoint accepts any anonymous POST anyway). Dev builds (`go build ./...`) have an empty default, so they run in local-only mode unless `CHATMEM_TELEMETRY_URL` is set. Env var always wins over the baked default so users can override.
+18. **When you add or change an MCP tool, update `.well-known/mcp/server-card.json` in the same commit** as `internal/mcp/server.go`. That JSON is what Smithery + the official MCP registry read to discover our tools without spawning the binary. If they drift, the registry entry lies about our capabilities.
 
 ## Platform support matrix
 
