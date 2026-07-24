@@ -1,5 +1,11 @@
 # chatmem
 
+[![GitHub Release](https://img.shields.io/github/v/release/sid077/chatmem?color=blue)](https://github.com/sid077/chatmem/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/sid077/chatmem/total?color=blue)](https://github.com/sid077/chatmem/releases)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue)](./LICENSE)
+[![Go 1.26+](https://img.shields.io/badge/go-1.26+-00add8?logo=go&logoColor=white)](https://go.dev/)
+[![smithery badge](https://smithery.ai/badge/@sid077/chatmem)](https://smithery.ai/server/@sid077/chatmem)
+
 **Local LLM chat history, served over MCP.**
 
 `chatmem` is a single-binary utility that captures your LLM conversations via [Model Context Protocol](https://modelcontextprotocol.io/) tools any client can call (Claude Code, Cursor, aider, custom SDKs), stores everything in an **embedded Postgres 18** database with **pgvector** on your machine, and serves relevant past context back to any LLM on demand.
@@ -341,6 +347,9 @@ chatmem/
 │   └── telemetry/              # install_id + opt-out gate
 │       └── telemetry.go
 ├── server/telemetry-worker/    # Cloudflare Worker + D1 for the telemetry ingest
+├── docs/
+│   └── marketplace-submissions.md  # Playbook: awesome-mcp / Smithery / PulseMCP / Glama
+├── smithery.yaml               # Smithery registry config (stdio start command)
 ├── .goreleaser.yaml            # cross-platform build + Homebrew tap + rpm/deb via nfpm
 ├── .github/workflows/release.yml  # tag push → goreleaser + gh-pages RPM repo publish
 ├── scripts/build-rpm-repo.sh   # assemble zypper/dnf repo tree locally (uses createrepo_c via docker)

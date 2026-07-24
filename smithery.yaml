@@ -1,0 +1,27 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+#
+# chatmem is a locally-installed binary (brew cask / zypper / dnf / apt /
+# tarball) that runs its own embedded Postgres per-user. Smithery lists it
+# in the registry and hands the client the exact stdio command to spawn.
+# Users install the binary themselves — Smithery does NOT host chatmem
+# because the whole point of chatmem is that data stays on the user's disk.
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      port:
+        type: number
+        description: Local port the embedded Postgres listens on. Default 54329. Only change if you already have something on that port.
+        default: 54329
+    additionalProperties: false
+  commandFunction: |-
+    (config) => ({
+      command: "chatmem",
+      args: config && config.port && config.port !== 54329
+        ? ["mcp", "--port", String(config.port)]
+        : ["mcp"]
+    })
+  exampleConfig:
+    port: 54329

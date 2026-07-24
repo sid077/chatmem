@@ -18,6 +18,8 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
 | `internal/telemetry` | Install id + opt-out gate + in-process aggregator + flush loop. | `Load(dataHome)`, `SetEnabled`, `NewAggregator()`, `NewClient(state, dataHome, log, opts).Start(ctx)` |
 | `server/telemetry-worker` | Cloudflare Worker + D1 that receives `POST /v1/ping`. Deployed independently via `wrangler`. | `server/telemetry-worker/src/index.ts`, `schema.sql`, `wrangler.toml` |
+| `smithery.yaml` | Smithery registry config. `startCommand.commandFunction` maps optional `config.port` to `chatmem mcp --port <n>` (stdio transport). Users install the binary themselves — Smithery does not host it. | Root `smithery.yaml` |
+| `docs/marketplace-submissions.md` | Playbook for getting listed on awesome-mcp-servers, Smithery, PulseMCP, Glama. Keep updated as marketplaces evolve. | `docs/marketplace-submissions.md` |
 | `scripts/build-rpm-repo.sh` | Assembles a zypper/dnf-compatible repo tree from `dist/*.rpm`. Runs `createrepo_c` inside a `fedora:41` docker container so macOS hosts don't need it installed. Default `BASE_URL` = `https://sid077.github.io/chatmem`. | `scripts/build-rpm-repo.sh [BASE_URL]` |
 | `.github/workflows/release.yml` | Tag-triggered release: `goreleaser release --clean` → assemble RPM repo tree with `createrepo_c` (native, not docker, in CI) → push to `gh-pages` branch. | `git push origin vX.Y.Z` |
 
