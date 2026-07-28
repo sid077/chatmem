@@ -54,7 +54,8 @@ Working today:
 | `chatmem init` | Provision the local database, apply schema, print MCP client config. |
 | `chatmem mcp` | Self-contained stdio MCP server (starts + manages embedded Postgres). |
 | `chatmem daemon` | Long-lived Postgres process (foundation for the future daemon+shim architecture). |
-| `chatmem telemetry {enable,disable,status}` | Manage anonymous telemetry; honors `CHATMEM_TELEMETRY=0`. |
+| `chatmem doctor` | Print a self-diagnostic report — HOME, EUID, data/cache paths, port availability, telemetry state, ingest reachability. Run this first if anything's weird. |
+| `chatmem telemetry {enable,disable,status,dump}` | Manage anonymous telemetry; honors `CHATMEM_TELEMETRY=0`. |
 
 ## Quickstart
 
@@ -430,6 +431,18 @@ xattr -d com.apple.quarantine "$(brew --prefix)/bin/chatmem"
 ```
 
 The real fix is signing + notarizing the darwin binary with an Apple Developer ID (planned for v0.0.2).
+
+**Anything weird? Run `chatmem doctor` first** — it prints HOME, EUID, effective data + cache paths, port availability, telemetry state, and ingest reachability, with a green/red check for each. Most install-time issues surface here in one screen.
+
+**`$HOME (…) is owned by uid X but you are uid Y — looks like `sudo -E` preserved a different HOME`** — you ran `sudo -E chatmem …`, which kept HOME=/root but dropped to a non-root uid. Do one of:
+
+```bash
+sudo -H -u <user> chatmem init         # -H rewrites HOME
+su - <user> -c "chatmem init"          # login shell resets HOME
+chatmem init                           # or just don't sudo — chatmem must run as your normal user
+```
+
+**`$HOME is not set`** — you're in a stripped environment (systemd unit without `Environment=HOME=…`, `env -i`, etc.). Set HOME explicitly to your login user's home directory.
 
 **`chatmem cannot run as root`** — on Linux, Postgres refuses to run under uid 0 and chatmem now refuses too, up-front. Re-run as an unprivileged user: `su - <username> -c 'chatmem init'` (or `sudo -u <username> chatmem init`).
 

@@ -21,7 +21,12 @@ var assetsFS embed.FS
 type Config struct {
 	DataDir    string
 	RuntimeDir string
-	Port       uint32
+	// CacheDir is where the Postgres binary tarball is cached across runs.
+	// Defaults to $CACHE_HOME/chatmem/binary-cache. Overriding this stops
+	// embedded-postgres from writing .embedded-postgres-go/ into $HOME or
+	// the working directory (which can fail on read-only or shared homes).
+	CacheDir string
+	Port     uint32
 	// LogWriter receives Postgres subprocess output (initdb + server logs).
 	// Defaults to os.Stderr. Set to io.Discard to silence.
 	// IMPORTANT: never leave this as os.Stdout in an MCP-over-stdio context.
@@ -39,13 +44,19 @@ func New(cfg Config) *Embedded {
 	if cfg.LogWriter == nil {
 		cfg.LogWriter = os.Stderr
 	}
+	if cfg.CacheDir == "" {
+		// Default beside the runtime dir so all "regeneratable" state
+		// lives under one predictable root.
+		cfg.CacheDir = filepath.Join(filepath.Dir(cfg.RuntimeDir), "binary-cache")
+	}
 	pg := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
 		Version(embeddedpostgres.V18).
 		RuntimePath(cfg.RuntimeDir).
 		DataPath(cfg.DataDir).
+		CachePath(cfg.CacheDir).
 		Port(cfg.Port).
 		Logger(cfg.LogWriter).
-		StartTimeout(60 * time.Second))
+		StartTimeout(90 * time.Second))
 	return &Embedded{
 		cfg: cfg,
 		pg:  pg,

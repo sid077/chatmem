@@ -12,7 +12,7 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 
 | Path | Responsibility | Key entry points |
 |------|-----------------|------------------|
-| `cmd/chatmem` | Cobra CLI. One file per subcommand. | `main.go`, `init.go`, `daemon.go`, `mcp.go`, `telemetry.go` |
+| `cmd/chatmem` | Cobra CLI. One file per subcommand. `daemon.go` also hosts `requireNonRoot()` + `preflight()` (HOME sanity) + `dataHome()` + `cacheHome()` shared helpers. | `main.go`, `init.go`, `daemon.go`, `mcp.go`, `telemetry.go`, `doctor.go` |
 | `internal/pg` | Embedded Postgres lifecycle + pgvector install. | `New(cfg)` → `Start(ctx)`, `Pool()`, `Stop()` |
 | `internal/store` | pgx-backed data access + schema. | `EnsureSchema`, `RecordMessage`, `SearchHistory`, `GetConversation` |
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
@@ -55,6 +55,8 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 16. **MCP tool handlers must guard `agg != nil` before calling Record*.** Tests pass `nil` for the aggregator to keep them fast + isolated; skipping the nil check would panic in `internal/mcp` tests.
 17. **The telemetry ingest URL is baked into release binaries via `-ldflags -X`** targeting `internal/telemetry.defaultIngestURL`. The literal string lives in `.goreleaser.yaml` (public info — the endpoint accepts any anonymous POST anyway). Dev builds (`go build ./...`) have an empty default, so they run in local-only mode unless `CHATMEM_TELEMETRY_URL` is set. Env var always wins over the baked default so users can override.
 18. **When you add or change an MCP tool, update `.well-known/mcp/server-card.json` in the same commit** as `internal/mcp/server.go`. That JSON is what Smithery + the official MCP registry read to discover our tools without spawning the binary. If they drift, the registry entry lies about our capabilities.
+19. **Every subcommand that touches state calls `requireNonRoot()` THEN `preflight()` at the top.** Preflight catches the two big footguns Postgres gives cryptic errors for: `sudo -E` preserving `HOME=/root` while dropping to non-root uid, and `HOME` unset entirely. Do not skip these — Postgres's own errors for these cases are unactionable.
+20. **`internal/pg.Config.CacheDir` overrides embedded-postgres's tarball cache.** Default is `<cacheHome>/binary-cache` so all regeneratable state lives under one predictable root. Without this override, embedded-postgres writes `.embedded-postgres-go/` into HOME (or worse, CWD if HOME is unwritable). Do not remove.
 
 ## Platform support matrix
 

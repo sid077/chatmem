@@ -23,6 +23,7 @@ func main() {
 		newDaemonCmd(),
 		newMCPCmd(),
 		newTelemetryCmd(),
+		newDoctorCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

@@ -31,6 +31,9 @@ func runInit(ctx context.Context) error {
 	if err := requireNonRoot(); err != nil {
 		return err
 	}
+	if err := preflight(); err != nil {
+		return err
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	dataDir := filepath.Join(dataHome(), "pgdata")

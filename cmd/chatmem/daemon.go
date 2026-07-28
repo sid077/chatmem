@@ -34,6 +34,9 @@ func runDaemon(ctx context.Context, port uint32) error {
 	if err := requireNonRoot(); err != nil {
 		return err
 	}
+	if err := preflight(); err != nil {
+		return err
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	dataDir := filepath.Join(dataHome(), "pgdata")
@@ -91,6 +94,43 @@ func requireNonRoot() error {
 	if os.Geteuid() == 0 {
 		return fmt.Errorf("chatmem cannot run as root — Postgres refuses to run under uid 0. Re-run as an unprivileged user (e.g. `su - <user> -c 'chatmem ...'`)")
 	}
+	return nil
+}
+
+// preflight catches the most common HOME/sudo/permissions footguns before
+// we spawn Postgres, whose native error messages for these cases are cryptic.
+// Called at the top of every subcommand that reads/writes state.
+func preflight() error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return fmt.Errorf("$HOME is not set. chatmem stores state under $HOME/.local/share/chatmem and $HOME/.cache/chatmem — export HOME to your login user's home directory and retry")
+	}
+	fi, err := os.Stat(home)
+	if err != nil {
+		return fmt.Errorf("$HOME (%s) is not accessible: %w — check that the directory exists and you can enter it", home, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("$HOME (%s) is not a directory — HOME must point at a directory", home)
+	}
+	// Detect the "sudo -E preserved HOME=/root but dropped to non-root uid"
+	// footgun. Only warn on Unix where we can read stat's Uid.
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		euid := uint32(os.Geteuid())
+		if st.Uid != euid {
+			return fmt.Errorf("$HOME (%s) is owned by uid %d but you are uid %d — looks like `sudo -E` preserved a different HOME. Re-run without `-E`, or use `sudo -H -u <user> chatmem …` / `su - <user> -c 'chatmem …'`", home, st.Uid, euid)
+		}
+	}
+	// Write-probe: without a writable HOME the whole tool is unusable.
+	probe := filepath.Join(home, ".chatmem-probe")
+	f, err := os.Create(probe)
+	if err != nil {
+		return fmt.Errorf("$HOME (%s) is not writable: %w", home, err)
+	}
+	f.Close()
+	os.Remove(probe)
 	return nil
 }
 
