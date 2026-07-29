@@ -74,7 +74,7 @@ type Resolution struct {
 
 type Diagram struct {
 	Type      string   `json:"type"`      // flowchart | sequenceDiagram | stateDiagram-v2 | timeline | erDiagram | classDiagram
-	Title     string   `json:"title"`
+	Title     string   `json:"title,omitempty"`
 	Mermaid   string   `json:"mermaid"`
 	CitedFrom []string `json:"cited_from,omitempty"`
 }

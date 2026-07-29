@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -439,10 +438,15 @@ func registerGetSynthesisPrompt(s *sdk.Server, d Deps) {
 	})
 }
 
+// synthesizeArgs — Summary is a typed struct (NOT json.RawMessage) so the
+// MCP SDK reflects the real object shape into the tool's input schema.
+// A prior version used json.RawMessage which the SDK saw as []byte and
+// advertised as `null | array<integer max 255>` — impossible to satisfy
+// from JSON. Do not revert.
 type synthesizeArgs struct {
-	ConversationID string          `json:"conversation_id" jsonschema:"UUID of the conversation"`
-	Summary        json.RawMessage `json:"summary" jsonschema:"structured Summary object matching the schema in get_synthesis_prompt"`
-	Force          bool            `json:"force,omitempty" jsonschema:"true = rewrite the Notion page even if the summary hash is unchanged"`
+	ConversationID string         `json:"conversation_id" jsonschema:"UUID of the conversation"`
+	Summary        notion.Summary `json:"summary" jsonschema:"structured Summary object matching the schema in get_synthesis_prompt"`
+	Force          bool           `json:"force,omitempty" jsonschema:"true = rewrite the Notion page even if the summary hash is unchanged"`
 }
 
 type synthesizeOut struct {
@@ -466,10 +470,7 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 		if err != nil {
 			return nil, synthesizeOut{}, fmt.Errorf("invalid conversation_id: %w", err)
 		}
-		var summary notion.Summary
-		if err := json.Unmarshal(args.Summary, &summary); err != nil {
-			return nil, synthesizeOut{}, fmt.Errorf("summary is not valid JSON: %w", err)
-		}
+		summary := args.Summary
 
 		sc, err := d.Store.GetSynthContext(ctx, convID)
 		if err != nil {

@@ -57,6 +57,7 @@ Working today:
 | `chatmem doctor` | Print a self-diagnostic report — HOME, EUID, data/cache paths, port availability, telemetry state, ingest reachability, Notion status. Run this first if anything's weird. |
 | `chatmem telemetry {enable,disable,status,dump}` | Manage anonymous telemetry; honors `CHATMEM_TELEMETRY=0`. |
 | `chatmem notion {connect,status,disconnect,list,resync,sample}` | Manage Notion integration for auto-synthesizing conversations into study/debug pages. See [Notion synthesis](#notion-synthesis-v020) below. |
+| `chatmem import` | Bulk-load an existing chat transcript (JSONL or JSON array) into chatmem. Great for backfilling conversations that happened outside a chatmem-connected client. See [Import an existing chat](#import-an-existing-chat-v021) below. |
 
 ## Quickstart
 
@@ -258,6 +259,75 @@ Failed Notion writes are persisted to `~/.local/share/chatmem/notion-pending/` a
 ```bash
 chatmem notion disconnect     # removes notion.json; published pages are untouched
 ```
+
+## Import an existing chat (v0.2.1)
+
+Got a transcript from a chat that happened outside chatmem — ChatGPT web export, a Claude.ai conversation you saved, an aider log, etc.? Load it into chatmem with `chatmem import`. Then either the LLM auto-synthesizes it to Notion (if past the threshold) or you nudge it manually.
+
+### Input formats
+
+Two formats accepted; auto-detected by the first non-whitespace character:
+
+**JSONL** (one JSON object per line):
+
+```jsonl
+{"role":"user","content":"what is hnsw"}
+{"role":"assistant","content":"a graph-based ANN index"}
+{"role":"user","content":"pgvector defaults?"}
+```
+
+**JSON array**:
+
+```json
+[
+  {"role":"user","content":"what is hnsw"},
+  {"role":"assistant","content":"a graph-based ANN index"}
+]
+```
+
+Extra fields on each message (timestamps, source ids, tool_calls) are silently ignored — chatmem generates its own ids and timestamps.
+
+### Commands
+
+```bash
+# From a file, opening a new conversation:
+chatmem import -f ./chatgpt-export.jsonl \
+  --model gpt-5 --provider openai --client-id chatgpt-web
+
+# Piping from stdin:
+cat ./transcript.jsonl | chatmem import --stdin \
+  --model claude-opus-4-7 --provider anthropic --client-id claude-web
+
+# Appending to an existing chatmem conversation (e.g. resume a partial capture):
+chatmem import -f ./followup.jsonl \
+  --conversation-id 8a2f... \
+  --model claude-opus-4-7 --provider anthropic --client-id claude-code
+```
+
+`chatmem import` **attaches to a running chatmem instance's Postgres** if one is up (Claude Code / Windsurf / etc. session live). Otherwise it starts its own embedded PG briefly. Either way it's safe to run.
+
+On success it prints the new conversation UUID + a hint to synthesize it in your LLM client:
+
+```
+imported 47 messages into conversation 8a2f...
+
+Next steps:
+  chatmem notion status
+  # From an LLM session with chatmem:
+  #   "call get_synthesis_prompt for conversation 8a2f..., then synthesize_to_notion"
+```
+
+### Converting from real chat exports
+
+- **ChatGPT `.zip` export → JSONL**: `jq` recipe (adjust for your export format):
+  ```bash
+  jq -c '.[0].mapping | to_entries | map(select(.value.message != null)) |
+         sort_by(.value.message.create_time) |
+         .[] | {role: .value.message.author.role, content: (.value.message.content.parts | join("\n"))}' \
+     < conversations.json > out.jsonl
+  ```
+- **Claude.ai export → JSONL**: `jq '.[] | {role: .sender, content: .text}' < conversation.json`
+- Anything text-based: turn each turn into `{"role":"...","content":"..."}` and you're done.
 
 ## Commands
 

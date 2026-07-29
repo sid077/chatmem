@@ -25,6 +25,7 @@ func main() {
 		newTelemetryCmd(),
 		newDoctorCmd(),
 		newNotionCmd(),
+		newImportCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

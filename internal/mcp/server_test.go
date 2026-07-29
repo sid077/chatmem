@@ -3,6 +3,8 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	chatmcp "github.com/sid077/chatmem/internal/mcp"
+	"github.com/sid077/chatmem/internal/notion"
 	chatpg "github.com/sid077/chatmem/internal/pg"
 	"github.com/sid077/chatmem/internal/store"
 )
@@ -169,6 +172,150 @@ func firstText(cs []sdk.Content) string {
 		}
 	}
 	return ""
+}
+
+// TestSynthesizeToolAcceptsSummaryObject reproduces the v0.2.0 bug where the
+// SDK reflected Summary as `[]byte` because the args struct used
+// json.RawMessage. The tool's schema advertised an array-of-integers and
+// clients couldn't call it with any real object. Fixed in v0.2.1 by making
+// Summary a typed notion.Summary field.
+func TestSynthesizeToolAcceptsSummaryObject(t *testing.T) {
+	tmp := t.TempDir()
+	pg := chatpg.New(chatpg.Config{
+		DataDir:    filepath.Join(tmp, "data"),
+		RuntimeDir: filepath.Join(tmp, "runtime"),
+		Port:       54338,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	if err := pg.Start(ctx); err != nil {
+		t.Fatalf("start pg: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.Stop() })
+
+	st := store.New(pg.Pool())
+	if err := st.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	// Mock Notion — accept everything, echo a page id.
+	notionMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/users/me":
+			w.Write([]byte(`{"id":"u","name":"n","type":"bot"}`))
+		case r.URL.Path == "/v1/pages":
+			w.Write([]byte(`{"id":"pg-1","url":"https://www.notion.so/pg1"}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer notionMock.Close()
+
+	if err := notion.SaveConfig(tmp, notion.Config{
+		IntegrationToken: "t", ParentPageID: "p", ConnectedAt: time.Now(),
+		AutoSynthesize: notion.DefaultAuto(),
+	}); err != nil {
+		t.Fatalf("save notion cfg: %v", err)
+	}
+	writer, err := notion.NewWriter(tmp, notionMock.URL)
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
+
+	server := chatmcp.NewServer(chatmcp.Deps{
+		Store: st, NotionWriter: writer, Version: "test",
+	})
+	client := sdk.NewClient(&sdk.Implementation{Name: "test-client"}, nil)
+	t1, t2 := sdk.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, t1, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	session, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer session.Close()
+
+	// Confirm the tool's advertised schema accepts an object for `summary`.
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	var synthTool *sdk.Tool
+	for _, tl := range tools.Tools {
+		if tl.Name == "synthesize_to_notion" {
+			synthTool = tl
+			break
+		}
+	}
+	if synthTool == nil {
+		t.Fatal("synthesize_to_notion tool not advertised")
+	}
+	schema, _ := json.Marshal(synthTool.InputSchema)
+	if !strings.Contains(string(schema), `"object"`) {
+		t.Fatalf("input schema does not accept an object for summary; got: %s", string(schema))
+	}
+	if strings.Contains(string(schema), `"maximum":255`) {
+		t.Fatalf("input schema still advertises byte-array shape (max:255) for summary; got: %s", string(schema))
+	}
+
+	// Seed a conversation so the tool has messages to cite.
+	rec, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "record_message",
+		Arguments: map[string]any{
+			"role": "user", "content": "test",
+			"model": "m", "provider": "p", "client_id": "c",
+		},
+	})
+	if err != nil || rec.IsError {
+		t.Fatalf("record_message failed: err=%v isErr=%v content=%v", err, rec.IsError, rec.Content)
+	}
+	var recStruct struct {
+		MessageID      string `json:"message_id"`
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := remarshal(rec.StructuredContent, &recStruct); err != nil {
+		t.Fatalf("decode record: %v", err)
+	}
+
+	// Now call synthesize_to_notion with a REAL summary OBJECT — not bytes.
+	summary := map[string]any{
+		"title":        "Test synth",
+		"session_type": "study",
+		"tldr":         []string{"one", "two"},
+		"concepts": []map[string]any{{
+			"heading":    "H",
+			"definition": "D",
+			"body":       "B",
+			"cited_from": []string{recStruct.MessageID},
+		}},
+		"diagrams": []map[string]any{{
+			"type": "flowchart", "mermaid": "flowchart TD\nA-->B",
+		}},
+	}
+	call, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "synthesize_to_notion",
+		Arguments: map[string]any{
+			"conversation_id": recStruct.ConversationID,
+			"summary":         summary,
+		},
+	})
+	if err != nil {
+		t.Fatalf("synthesize_to_notion call: %v", err)
+	}
+	if call.IsError {
+		t.Fatalf("synthesize_to_notion returned error: %s", firstText(call.Content))
+	}
+	var out struct {
+		NotionURL string `json:"notion_url"`
+	}
+	if err := remarshal(call.StructuredContent, &out); err != nil {
+		t.Fatalf("decode structured: %v", err)
+	}
+	if out.NotionURL == "" {
+		t.Fatal("expected non-empty notion_url in structured response")
+	}
 }
 
 func remarshal(src any, dst any) error {

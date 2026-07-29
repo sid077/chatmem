@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
 	"github.com/sid077/chatmem/internal/notion"
@@ -249,10 +250,26 @@ func notionSampleCmd() *cobra.Command {
 	return cmd
 }
 
-// openStore is a small helper used by CLI commands that need to read the
-// store outside of the mcp/daemon lifecycles (list/resync). Returns a
-// cleanup function that stops the embedded Postgres.
+// openStore returns a Store bound to chatmem's Postgres. If another chatmem
+// process is already running (chatmem mcp / daemon from a live Windsurf or
+// Claude Code session), we attach to its Postgres on the default port
+// instead of trying to start a second one — Postgres refuses two processes
+// on the same data dir. In "attached" mode the cleanup func is a no-op.
 func openStore(ctx context.Context) (*store.Store, func(), error) {
+	// First try: attach to a running instance.
+	dsn := fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/postgres?sslmode=disable&connect_timeout=2", defaultPort)
+	if pool, err := pgxpool.New(ctx, dsn); err == nil {
+		if err := pool.Ping(ctx); err == nil {
+			s := store.New(pool)
+			if err := s.EnsureSchema(ctx); err == nil {
+				return s, func() { pool.Close() }, nil
+			}
+			pool.Close()
+		} else {
+			pool.Close()
+		}
+	}
+	// Fall back: start our own embedded PG (owned mode).
 	pg := chatpg.New(chatpg.Config{
 		DataDir:    dataHome() + "/pgdata",
 		RuntimeDir: cacheHome() + "/pg-runtime",

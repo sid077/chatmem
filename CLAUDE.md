@@ -12,7 +12,7 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 
 | Path | Responsibility | Key entry points |
 |------|-----------------|------------------|
-| `cmd/chatmem` | Cobra CLI. One file per subcommand. `daemon.go` also hosts `requireNonRoot()` + `preflight()` (HOME sanity) + `dataHome()` + `cacheHome()` shared helpers. | `main.go`, `init.go`, `daemon.go`, `mcp.go`, `telemetry.go`, `doctor.go` |
+| `cmd/chatmem` | Cobra CLI. One file per subcommand. `daemon.go` also hosts `requireNonRoot()` + `preflight()` (HOME sanity) + `dataHome()` + `cacheHome()` shared helpers. `notion.go` hosts `openStore()` — the "attach to running chatmem PG if present, else start own" helper used by CLI commands that read the store outside the mcp/daemon lifecycles. | `main.go`, `init.go`, `daemon.go`, `mcp.go`, `telemetry.go`, `doctor.go`, `notion.go`, `import.go` |
 | `internal/pg` | Embedded Postgres lifecycle + pgvector install. | `New(cfg)` → `Start(ctx)`, `Pool()`, `Stop()` |
 | `internal/store` | pgx-backed data access + schema. | `EnsureSchema`, `RecordMessage`, `SearchHistory`, `GetConversation` |
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
@@ -61,6 +61,8 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 21. **`internal/mcp.NewServer(Deps{...})` — always add features via the Deps struct.** Positional arguments broke twice; the struct keeps forward-compat. `Deps.NotionWriter == nil` means notion tools return "not configured", not panic — every new feature must degrade cleanly when its dep is nil.
 22. **When you change the MCP tool set, update `.well-known/mcp/server-card.json` AND the notion prompt schema in the same commit.** The server-card is what registries advertise; the notion prompt is what the LLM follows. Drift breaks discovery + synthesis quality.
 23. **Notion synthesis is opt-in per install.** If `notion.json` doesn't exist, chatmem behaves exactly as it did before the feature landed. All three notion MCP tools return "not configured" errors instead of panicking. Do not require Notion for any core workflow.
+24. **MCP tool args must be typed, never `json.RawMessage` / `[]byte`.** The SDK's JSON-Schema reflector renders `[]byte` as `null | array<integer max 255>`, which makes the tool impossible to call from JSON. v0.2.0's `synthesize_to_notion` shipped with this bug (fixed in v0.2.1 by using `notion.Summary` directly for the field). If you want "unstructured" args, use `map[string]any` or a named struct — never bytes. Regression covered by `TestSynthesizeToolAcceptsSummaryObject` in `internal/mcp/`.
+25. **Optional Summary fields must have `,omitempty` on their json tag.** The SDK's schema reflector treats string fields without omitempty as `required`. Missing omitempty on `Diagram.Title` was v0.2.1's second bug (fixed same tag). When adding sub-types to `notion.Summary`, check each field's optionality against the prompt-schema doc in `internal/notion/prompt.go` and match tags accordingly.
 
 ## Platform support matrix
 
