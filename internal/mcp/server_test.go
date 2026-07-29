@@ -35,7 +35,7 @@ func TestMCPServerRoundTrip(t *testing.T) {
 		t.Fatalf("ensure schema: %v", err)
 	}
 
-	server := chatmcp.NewServer(st, nil, "test")
+	server := chatmcp.NewServer(chatmcp.Deps{Store: st, Version: "test"})
 	client := sdk.NewClient(&sdk.Implementation{Name: "test-client"}, nil)
 	t1, t2 := sdk.NewInMemoryTransports()
 

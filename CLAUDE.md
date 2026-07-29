@@ -17,6 +17,7 @@ Design plan (larger-picture context): `~/.claude/plans/i-want-to-make-buzzing-co
 | `internal/store` | pgx-backed data access + schema. | `EnsureSchema`, `RecordMessage`, `SearchHistory`, `GetConversation` |
 | `internal/mcp` | MCP tool registration. | `NewServer(store, version)` → `*sdk.Server` |
 | `internal/telemetry` | Install id + opt-out gate + in-process aggregator + flush loop. | `Load(dataHome)`, `SetEnabled`, `NewAggregator()`, `NewClient(state, dataHome, log, opts).Start(ctx)` |
+| `internal/notion` | Notion synthesis: config, HTTP client, block builders, Summary schema + validation, study/debug page rendering, pending-write persistence. | `NewWriter(dataHome, "")` → `w.Synthesize(ctx, in)`; `BuildSynthesisPrompt(conv)` for the LLM brief. |
 | `server/telemetry-worker` | Cloudflare Worker + D1 that receives `POST /v1/ping`. Deployed independently via `wrangler`. | `server/telemetry-worker/src/index.ts`, `schema.sql`, `wrangler.toml` |
 | `smithery.yaml` | Kept for future re-attempt. Smithery today only accepts hosted URLs or spawnable packages; native-binary MCP servers like chatmem are not registerable there. File explains this in its header. | Root `smithery.yaml` |
 | `docs/marketplace-submissions.md` | Playbook for getting listed on awesome-mcp-servers, Smithery, PulseMCP, Glama. Keep updated as marketplaces evolve. | `docs/marketplace-submissions.md` |
@@ -57,6 +58,9 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 18. **When you add or change an MCP tool, update `.well-known/mcp/server-card.json` in the same commit** as `internal/mcp/server.go`. That JSON is what Smithery + the official MCP registry read to discover our tools without spawning the binary. If they drift, the registry entry lies about our capabilities.
 19. **Every subcommand that touches state calls `requireNonRoot()` THEN `preflight()` at the top.** Preflight catches the two big footguns Postgres gives cryptic errors for: `sudo -E` preserving `HOME=/root` while dropping to non-root uid, and `HOME` unset entirely. Do not skip these — Postgres's own errors for these cases are unactionable.
 20. **`internal/pg.Config.CacheDir` overrides embedded-postgres's tarball cache.** Default is `<cacheHome>/binary-cache` so all regeneratable state lives under one predictable root. Without this override, embedded-postgres writes `.embedded-postgres-go/` into HOME (or worse, CWD if HOME is unwritable). Do not remove.
+21. **`internal/mcp.NewServer(Deps{...})` — always add features via the Deps struct.** Positional arguments broke twice; the struct keeps forward-compat. `Deps.NotionWriter == nil` means notion tools return "not configured", not panic — every new feature must degrade cleanly when its dep is nil.
+22. **When you change the MCP tool set, update `.well-known/mcp/server-card.json` AND the notion prompt schema in the same commit.** The server-card is what registries advertise; the notion prompt is what the LLM follows. Drift breaks discovery + synthesis quality.
+23. **Notion synthesis is opt-in per install.** If `notion.json` doesn't exist, chatmem behaves exactly as it did before the feature landed. All three notion MCP tools return "not configured" errors instead of panicking. Do not require Notion for any core workflow.
 
 ## Platform support matrix
 

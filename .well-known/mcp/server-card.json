@@ -138,27 +138,46 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "conversation_id": {
-            "type": "string",
-            "description": "UUID of the conversation"
-          },
-          "limit": {
-            "type": "integer",
-            "description": "max messages to return (default 100, max 500)"
-          },
-          "after": {
-            "type": "string",
-            "description": "RFC3339 timestamp cursor; return messages strictly after this"
-          }
+          "conversation_id": { "type": "string", "description": "UUID of the conversation" },
+          "limit":           { "type": "integer", "description": "max messages to return (default 100, max 500)" },
+          "after":           { "type": "string", "description": "RFC3339 timestamp cursor; return messages strictly after this" }
         },
         "required": ["conversation_id"]
       },
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "readOnlyHint": true,
-        "openWorldHint": false
-      }
+      "annotations": { "destructiveHint": false, "idempotentHint": true, "readOnlyHint": true, "openWorldHint": false }
+    },
+    {
+      "name": "get_synthesis_prompt",
+      "description": "Return the full brief the LLM should follow to compose a Summary payload for synthesize_to_notion. Includes transcript + JSON schema + quality rules + message UUIDs to cite.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "conversation_id": { "type": "string", "description": "UUID of the conversation to summarize" } },
+        "required": ["conversation_id"]
+      },
+      "annotations": { "destructiveHint": false, "idempotentHint": true, "readOnlyHint": true, "openWorldHint": false }
+    },
+    {
+      "name": "synthesize_to_notion",
+      "description": "Publish a structured summary of a conversation as a Notion page (or update the existing one). Pass a Summary object composed per the get_synthesis_prompt schema; chatmem validates + renders and writes to Notion.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "conversation_id": { "type": "string", "description": "UUID of the conversation" },
+          "summary":         { "type": "object", "description": "structured Summary object matching the schema in get_synthesis_prompt" },
+          "force":           { "type": "boolean", "description": "rewrite the Notion page even if the summary hash is unchanged" }
+        },
+        "required": ["conversation_id", "summary"]
+      },
+      "annotations": { "destructiveHint": false, "idempotentHint": false, "readOnlyHint": false, "openWorldHint": true }
+    },
+    {
+      "name": "list_notion_pages",
+      "description": "List conversations that have been published to Notion by chatmem. Useful to check whether a topic is already covered.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "limit": { "type": "integer", "description": "max pages to return (default 50, max 500)" } }
+      },
+      "annotations": { "destructiveHint": false, "idempotentHint": true, "readOnlyHint": true, "openWorldHint": false }
     }
   ]
 }

@@ -55,3 +55,17 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_entity_idx ON events (entity_type, entity_id);
+
+-- Notion synthesis (v0.2.0). Columns added idempotently so schema is safe
+-- to re-apply on live DBs. See internal/notion for the writer.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_page_id            TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_page_url           TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_synthesized_at     TIMESTAMPTZ;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_session_type       TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_summary_hash       TEXT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS messages_since_last_synth INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_message_at           TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS conversations_needs_synth_idx
+    ON conversations (last_message_at)
+    WHERE messages_since_last_synth > 0;

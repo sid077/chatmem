@@ -45,8 +45,11 @@ type RecordMessageIn struct {
 }
 
 type RecordMessageOut struct {
-	MessageID      uuid.UUID
-	ConversationID uuid.UUID
+	MessageID              uuid.UUID
+	ConversationID         uuid.UUID
+	MessagesSinceLastSynth int    // counter after this write
+	LastMessageAt          time.Time
+	NotionPageURL          string // "" if never synthesized
 }
 
 func (s *Store) RecordMessage(ctx context.Context, in RecordMessageIn) (RecordMessageOut, error) {
@@ -67,12 +70,18 @@ func (s *Store) RecordMessage(ctx context.Context, in RecordMessageIn) (RecordMe
 	if convID == uuid.Nil {
 		convID = uuid.New()
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO conversations (id, client_id, model, provider) VALUES ($1,$2,$3,$4)`,
+			`INSERT INTO conversations (id, client_id, model, provider, last_message_at, messages_since_last_synth)
+			 VALUES ($1,$2,$3,$4, now(), 1)`,
 			convID, in.ClientID, in.Model, in.Provider); err != nil {
 			return RecordMessageOut{}, fmt.Errorf("insert conversation: %w", err)
 		}
 	} else {
-		if _, err := tx.Exec(ctx, `UPDATE conversations SET updated_at = now() WHERE id = $1`, convID); err != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE conversations
+			   SET updated_at = now(),
+			       last_message_at = now(),
+			       messages_since_last_synth = messages_since_last_synth + 1
+			 WHERE id = $1`, convID); err != nil {
 			return RecordMessageOut{}, fmt.Errorf("touch conversation: %w", err)
 		}
 	}
@@ -95,10 +104,180 @@ func (s *Store) RecordMessage(ctx context.Context, in RecordMessageIn) (RecordMe
 		return RecordMessageOut{}, fmt.Errorf("insert chunk: %w", err)
 	}
 
+	// Snapshot the post-write conversation state for the synth-hint decision.
+	var out RecordMessageOut
+	out.MessageID = msgID
+	out.ConversationID = convID
+	if err := tx.QueryRow(ctx,
+		`SELECT messages_since_last_synth, last_message_at, COALESCE(notion_page_url, '')
+		 FROM conversations WHERE id = $1`, convID).
+		Scan(&out.MessagesSinceLastSynth, &out.LastMessageAt, &out.NotionPageURL); err != nil {
+		return RecordMessageOut{}, fmt.Errorf("read conv state: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return RecordMessageOut{}, err
 	}
-	return RecordMessageOut{MessageID: msgID, ConversationID: convID}, nil
+	return out, nil
+}
+
+// RecordSynthesis marks a conversation as freshly synthesized. Called by the
+// notion writer after a successful Notion API call. Resets messages_since_last_synth.
+type RecordSynthesisIn struct {
+	ConversationID uuid.UUID
+	PageID         string
+	PageURL        string
+	SessionType    string
+	SummaryHash    string
+}
+
+func (s *Store) RecordSynthesis(ctx context.Context, in RecordSynthesisIn) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE conversations
+		   SET notion_page_id = $2,
+		       notion_page_url = $3,
+		       notion_session_type = $4,
+		       notion_summary_hash = $5,
+		       notion_synthesized_at = now(),
+		       messages_since_last_synth = 0
+		 WHERE id = $1`,
+		in.ConversationID, in.PageID, in.PageURL, in.SessionType, in.SummaryHash)
+	if err != nil {
+		return fmt.Errorf("update synth state: %w", err)
+	}
+	return nil
+}
+
+// NotionPage is a row in the local index of published pages.
+type NotionPage struct {
+	ConversationID uuid.UUID
+	PageID         string
+	URL            string
+	SessionType    string
+	SynthesizedAt  time.Time
+	SummaryHash    string
+	Model          string
+	ClientID       string
+}
+
+// ListNotionPages returns all conversations that have been synthesized,
+// most recent first. Used by `chatmem notion list` and the list_notion_pages MCP tool.
+func (s *Store) ListNotionPages(ctx context.Context, limit int) ([]NotionPage, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT c.id, c.notion_page_id, c.notion_page_url,
+		        COALESCE(c.notion_session_type, ''), c.notion_synthesized_at,
+		        COALESCE(c.notion_summary_hash, ''), c.model, c.client_id
+		 FROM conversations c
+		 WHERE c.notion_page_id IS NOT NULL
+		 ORDER BY c.notion_synthesized_at DESC NULLS LAST
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NotionPage
+	for rows.Next() {
+		var p NotionPage
+		if err := rows.Scan(&p.ConversationID, &p.PageID, &p.URL, &p.SessionType,
+			&p.SynthesizedAt, &p.SummaryHash, &p.Model, &p.ClientID); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SynthContext bundles everything the notion synthesis pipeline needs about
+// one conversation, in a single DB call.
+type SynthContext struct {
+	ConversationID     uuid.UUID
+	Model              string
+	Provider           string
+	ClientID           string
+	NotionPageID       string
+	NotionSummaryHash  string
+	SynthesizedVersion int // number of successful past synths; 0 = never
+	Messages           []Message
+}
+
+// GetSynthContext loads the conversation's notion state + all messages.
+// Used by both get_synthesis_prompt (needs messages) and synthesize_to_notion
+// (needs messages + notion state).
+func (s *Store) GetSynthContext(ctx context.Context, convID uuid.UUID) (SynthContext, error) {
+	var out SynthContext
+	out.ConversationID = convID
+
+	var pageID, hash *string
+	var synthedAt *time.Time
+	if err := s.pool.QueryRow(ctx,
+		`SELECT model, provider, client_id,
+		        notion_page_id, notion_summary_hash, notion_synthesized_at
+		 FROM conversations WHERE id = $1`, convID).
+		Scan(&out.Model, &out.Provider, &out.ClientID,
+			&pageID, &hash, &synthedAt); err != nil {
+		return SynthContext{}, fmt.Errorf("load conv metadata: %w", err)
+	}
+	if pageID != nil {
+		out.NotionPageID = *pageID
+	}
+	if hash != nil {
+		out.NotionSummaryHash = *hash
+	}
+	if synthedAt != nil {
+		out.SynthesizedVersion = 1 // count is fine as "at least once"; the callers only need version+1
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, role, content, tool_calls, token_count, created_at
+		 FROM messages
+		 WHERE conversation_id = $1
+		 ORDER BY created_at ASC`, convID)
+	if err != nil {
+		return SynthContext{}, fmt.Errorf("load messages: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt); err != nil {
+			return SynthContext{}, err
+		}
+		out.Messages = append(out.Messages, m)
+	}
+	return out, rows.Err()
+}
+
+// ConversationsNeedingSynth returns conversations past the auto-fire threshold,
+// used by the background sweep to build the stale-synth log.
+type NeedsSynth struct {
+	ConversationID         uuid.UUID
+	MessagesSinceLastSynth int
+	LastMessageAt          time.Time
+	IsNewPage              bool
+}
+
+func (s *Store) ConversationsNeedingSynth(ctx context.Context, messageThreshold, minMessages int, idleCutoff time.Time) ([]NeedsSynth, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, messages_since_last_synth, last_message_at, notion_page_id IS NULL
+		 FROM conversations
+		 WHERE messages_since_last_synth >= $1
+		    OR (messages_since_last_synth >= $2 AND last_message_at < $3)`,
+		messageThreshold, minMessages, idleCutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []NeedsSynth
+	for rows.Next() {
+		var n NeedsSynth
+		if err := rows.Scan(&n.ConversationID, &n.MessagesSinceLastSynth, &n.LastMessageAt, &n.IsNewPage); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 type Conversation struct {

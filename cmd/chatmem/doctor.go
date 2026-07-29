@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sid077/chatmem/internal/notion"
 	"github.com/sid077/chatmem/internal/telemetry"
 )
 
@@ -87,6 +88,37 @@ func runDoctor() {
 		fmt.Printf("pending payloads: %d\n", len(pending))
 		if len(pending) > 0 {
 			fmt.Printf("  (list with: chatmem telemetry dump)\n")
+		}
+	}
+
+	// Notion section
+	fmt.Println()
+	fmt.Println("── notion ──")
+	ncfg, err := notion.LoadConfig(dataHome())
+	if err != nil {
+		fmt.Printf("config: load failed (%v)\n", err)
+	} else if ncfg == nil {
+		fmt.Println("state: not connected")
+		fmt.Println("hint:  chatmem notion connect <token> --parent <page-id>")
+	} else {
+		fmt.Printf("state:       connected since %s\n", ncfg.ConnectedAt.Format("2006-01-02"))
+		fmt.Printf("parent:      %s\n", ncfg.ParentPageID)
+		fmt.Printf("auto-synth:  enabled=%v threshold=%d idle_min=%d\n",
+			ncfg.AutoSynthesize.Enabled, ncfg.AutoSynthesize.MessageThreshold, ncfg.AutoSynthesize.IdleMinutes)
+		w, err := notion.NewWriter(dataHome(), "")
+		if err == nil && w != nil {
+			check("notion token valid", func() error {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, e := w.Ping(ctx)
+				return e
+			})
+			if n, err := w.PendingCount(); err == nil {
+				fmt.Printf("pending writes: %d\n", n)
+				if n > 0 {
+					fmt.Println("  (retry with: chatmem notion resync)")
+				}
+			}
 		}
 	}
 }

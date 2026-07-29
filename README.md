@@ -54,8 +54,9 @@ Working today:
 | `chatmem init` | Provision the local database, apply schema, print MCP client config. |
 | `chatmem mcp` | Self-contained stdio MCP server (starts + manages embedded Postgres). |
 | `chatmem daemon` | Long-lived Postgres process (foundation for the future daemon+shim architecture). |
-| `chatmem doctor` | Print a self-diagnostic report — HOME, EUID, data/cache paths, port availability, telemetry state, ingest reachability. Run this first if anything's weird. |
+| `chatmem doctor` | Print a self-diagnostic report — HOME, EUID, data/cache paths, port availability, telemetry state, ingest reachability, Notion status. Run this first if anything's weird. |
 | `chatmem telemetry {enable,disable,status,dump}` | Manage anonymous telemetry; honors `CHATMEM_TELEMETRY=0`. |
+| `chatmem notion {connect,status,disconnect,list,resync,sample}` | Manage Notion integration for auto-synthesizing conversations into study/debug pages. See [Notion synthesis](#notion-synthesis-v020) below. |
 
 ## Quickstart
 
@@ -210,6 +211,52 @@ Structured (`StructuredContent`):
   ],
   "next_after": null
 }
+```
+
+## Notion synthesis (v0.2.0)
+
+After each conversation, chatmem can auto-publish a **structured, concept-organized Notion page** — a study-mode page for learning conversations, or a debug-mode page for problem-solving sessions. The pages are optimized for revision: TL;DR at the top, Mermaid diagrams for anything with structure or flow, citations back to the original messages, full transcript collapsed at the bottom.
+
+### Setup (once)
+
+1. Create an internal Notion integration at https://www.notion.so/my-integrations. Copy the secret token (starts with `ntn_` or `secret_`).
+2. Create a Notion page that will hold your chatmem pages. Share it with the integration (⋯ → Add connections → your integration).
+3. On your machine:
+   ```bash
+   chatmem notion connect ntn_XXXXX --parent <page-url-or-id>
+   chatmem notion status     # verify token + parent
+   ```
+
+Restart your MCP client (Windsurf/Cursor/Claude Code). Auto-synthesis fires when a conversation crosses 20 messages, or the client-side rule triggers on `suggest_synthesize=true` in `record_message` responses.
+
+### System-prompt rule for your MCP client
+
+Paste this into your Windsurf / Cursor / Claude-Code rules so auto-fire lands:
+
+> Whenever a `record_message` tool response includes `suggest_synthesize: true`, immediately (a) call `get_synthesis_prompt` for the referenced `conversation_id`, (b) compose the Summary object per the schema in that prompt, (c) call `synthesize_to_notion` with `{conversation_id, summary}`. Do this once per conversation per trigger, before continuing the user's turn.
+
+### Page types
+
+- **Study mode** (concept-heavy conversations): TL;DR · Prerequisites · Core Concepts (definition callout + body + example + why-it-matters + citations) · Mermaid diagrams · Key Insights · Code · Further Study · References · Full Transcript.
+- **Debug mode** (fixing a broken thing): TL;DR · Status callout (resolved / partial / unresolved) · Timeline Mermaid diagram · What I Tried (attempts) · Root Cause · Resolution · Prevention · Full Transcript.
+
+Session type is auto-classified per conversation. Diagrams are required (validation enforced) — Mermaid `timeline` for debug, appropriate diagram type for study when concepts warrant one.
+
+### Preview the templates without touching Notion
+
+```bash
+chatmem notion sample --type=study    # prints Summary JSON + rendered blocks JSON
+chatmem notion sample --type=debug
+```
+
+### Reliability
+
+Failed Notion writes are persisted to `~/.local/share/chatmem/notion-pending/` and retried automatically on the next `chatmem mcp` start, or manually with `chatmem notion resync`.
+
+### Disconnect
+
+```bash
+chatmem notion disconnect     # removes notion.json; published pages are untouched
 ```
 
 ## Commands
