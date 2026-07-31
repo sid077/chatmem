@@ -169,3 +169,227 @@ func ValidUUIDSet(msgs []PromptMessage) map[string]bool {
 	}
 	return out
 }
+
+// FactRecord is the caller-facing version of internal/store.Fact. Repeated
+// here to avoid a store→notion import cycle.
+type FactRecord struct {
+	MessageID  string
+	Category   string
+	Text       string
+	Importance string
+}
+
+// ExtractionInput is what get_extraction_prompt returns to the LLM.
+type ExtractionInput struct {
+	ConversationID string
+	Model          string
+	Provider       string
+	ClientID       string
+	Messages       []PromptMessage // ONLY unextracted messages, chunk-limited
+	TotalMessages  int
+	AlreadyExtractedFacts int
+	Remaining      int // # messages still unextracted after this chunk
+}
+
+// BuildExtractionPrompt returns the plain-text brief for the extraction
+// phase. The LLM emits facts via record_facts; extraction is chunked so
+// long conversations don't overflow the LLM's context.
+func BuildExtractionPrompt(in ExtractionInput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# chatmem: extract atomic facts (chunk of %d unextracted messages)\n\n", len(in.Messages))
+	fmt.Fprintf(&b, "Conversation: %s (model=%s / provider=%s / client=%s)\n", in.ConversationID, in.Model, in.Provider, in.ClientID)
+	fmt.Fprintf(&b, "This chunk: %d messages · Total in conversation: %d · Facts already recorded: %d · After this chunk, remaining unextracted: %d.\n\n",
+		len(in.Messages), in.TotalMessages, in.AlreadyExtractedFacts, in.Remaining)
+
+	b.WriteString(`## What to do
+
+For each message in the transcript below, extract every atomic fact worth
+remembering. A "fact" is a single specific piece of information: a concept
+definition, a decision made, a command run, an error observed, a URL
+referenced, an open question, a code snippet's purpose, a hint for a
+diagram. Aim for **completeness over brevity** — this is the extraction
+phase; compression happens in the next phase (synthesis).
+
+Then call the ` + "`record_facts`" + ` MCP tool with:
+  {
+    "conversation_id": "<top of this brief>",
+    "facts": [
+      { "message_id": "<uuid from the transcript>",
+        "category": "concept | decision | command | error | reference | question | code | diagram-hint | insight",
+        "text": "the atomic fact, verbatim quote when it's a command / error / exact number",
+        "importance": "critical | normal | trivial" },
+      ...
+    ]
+  }
+
+If there are more unextracted messages after this chunk (see 'Remaining'
+above), the record_facts response will tell you — call ` + "`get_extraction_prompt`" + `
+again to fetch the next chunk. Do this until Remaining reaches 0. THEN
+proceed to get_synthesis_prompt.
+
+## Rules
+
+1. **Extract from EVERY message.** If a message really has no useful content
+   (empty greetings, "ok thanks", pure noise), emit a single fact with
+   importance=trivial so chatmem knows you saw it.
+2. **Multiple facts per message are fine and encouraged** for substantive
+   messages. Do not compress here.
+3. **Verbatim quotes for anything factual**: commands, error strings, exact
+   numbers, code identifiers, URLs. Paraphrasing loses precision the reader
+   will need.
+4. **Categories are strict**: pick one of the allowed values per fact.
+   - concept: an idea, definition, principle, mechanism
+   - decision: a choice made in the conversation
+   - command: a shell/tool/SQL command mentioned or run
+   - error: an error message or symptom
+   - reference: a URL, doc name, package name, standard
+   - question: a question the user or assistant raised
+   - code: a code snippet worth capturing
+   - diagram-hint: something that suggests a visual (state machine, flow, timeline)
+   - insight: a non-obvious realization or correction
+5. **Importance**:
+   - critical: without this, the note is wrong or incomplete
+   - normal: default; the reader would want to know this
+   - trivial: filler, greetings, meta-chatter; chatmem excludes these from coverage requirements
+
+## Transcript chunk
+
+`)
+	for _, m := range in.Messages {
+		fmt.Fprintf(&b, "--- [%s] role=%s @ %s ---\n%s\n\n",
+			m.ID, m.Role, m.CreatedAt.Format("2006-01-02 15:04:05"), m.Content)
+	}
+	b.WriteString("\n## Now\n\nEmit facts via record_facts. Do not skip any message in this chunk.\n")
+	return b.String()
+}
+
+// BuildSynthesisPromptWithFacts is the v0.3.0 replacement for
+// BuildSynthesisPrompt. It includes both the transcript AND the extracted
+// facts, so the LLM composes the Summary from concrete building blocks
+// rather than reading the transcript again.
+//
+// If facts is empty, this degrades to the v0.2.x prompt shape (still works,
+// just without the coverage-guarantee advantage).
+func BuildSynthesisPromptWithFacts(c PromptConversation, facts []FactRecord) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# chatmem synthesis brief for conversation %s\n\n", c.ConversationID)
+	fmt.Fprintf(&b, "Model=%s / provider=%s / client=%s · %d messages · %d extracted facts.\n\n",
+		c.Model, c.Provider, c.ClientID, len(c.Messages), len(facts))
+
+	if len(facts) > 0 {
+		b.WriteString(`You extracted the facts below in the previous phase. **This is your inventory.** Every non-trivia fact must appear somewhere in the Summary — either as a Concept body, an Attempt line, a Root Cause, an Insight, a Code block, a Reference, or an Open Question. If you can't fit a fact anywhere, that's a sign the Summary is under-covered.
+
+The synthesize_to_notion tool WILL REFUSE to write to Notion if coverage is below 95% (measured as messages-with-non-trivia-facts that are cited via cited_from). If that happens, the error lists which message uuids were missed — extend the Summary and call synthesize_to_notion again.
+
+`)
+	} else {
+		b.WriteString(`You did NOT extract facts in a previous phase. Coverage will be measured against ALL messages — every message uuid must appear in some cited_from list. If that's too strict, cancel and call get_extraction_prompt first.
+
+`)
+	}
+
+	b.WriteString(`## What to do
+
+1. Read the facts inventory and the transcript below.
+2. Classify session_type as "study" | "debug" | "mixed".
+3. Draft a Summary JSON matching the schema in this brief.
+4. Call ` + "`synthesize_to_notion`" + ` with:
+   { "conversation_id": "<the id at the top>",
+     "summary": <your Summary object> }
+5. If coverage fails, read the returned "missed_message_ids" list and add
+   coverage for those messages (either by citing them in an existing
+   section or adding a new section). Then call synthesize_to_notion again.
+
+## Session-type signals
+
+- **debug**: presence of error messages, stack traces, shell commands, iteration on a broken thing.
+- **study**: question-and-answer, conceptual definitions, worked examples, no shell commands.
+- **mixed**: both.
+
+## Quality rules
+
+1. **Concept-first**, not turn-first.
+2. **Cite every non-trivial claim** with source msg uuid in cited_from.
+3. **Include a Mermaid diagram** when applicable:
+   - debug → REQUIRED timeline diagram
+   - study → required when concepts ≥ 3 OR any concept mentions architecture/flow/protocol/pipeline/state/lifecycle/handshake
+   - use flowchart / sequenceDiagram / stateDiagram-v2 / timeline / erDiagram / classDiagram
+4. Concept structure: heading + 1-2 sentence definition + longer body + optional example + optional why-it-matters + citations.
+5. Debug structure: numbered Attempts (each with command + expected + actual + learning) + Root Cause + Resolution steps + Prevention.
+6. Corrections: capture the FINAL truth in the body; record the correction itself as an Insight ("initial X → actually Y because Z").
+7. **No invented content.** If the conversation didn't cover something, omit that section.
+8. Verbatim quotes for factual bits (commands, errors, exact numbers).
+9. Title: 4-10 words, specific, searchable.
+10. TLDR: 3-5 bullets a reader can scan in 15s.
+
+## Summary JSON schema
+
+` + "```json" + `
+{
+  "title":         "string, 4-10 words",
+  "session_type":  "study" | "debug" | "mixed",
+  "status":        "resolved" | "partial" | "unresolved",   // DEBUG ONLY
+  "tldr":          ["3-5 short bullets"],
+  "prerequisites": ["optional; assumed knowledge for study pages"],
+  "concepts": [
+    {
+      "heading":        "Concept name",
+      "definition":     "1-2 sentences; blue-callout",
+      "body":           "Longer explanation, markdown paragraphs.",
+      "example":        "Optional example",
+      "why_it_matters": "Optional one-liner",
+      "cited_from":     ["<msg uuid>", ...]
+    }
+  ],
+  "attempts": [
+    {
+      "number":      1,
+      "description": "What I tried",
+      "command":     "verbatim, optional",
+      "expected":    "expected outcome",
+      "actual":      "actual outcome",
+      "learning":    "what I concluded",
+      "cited_from":  ["<uuid>", ...]
+    }
+  ],
+  "root_cause": { "text": "...", "cited_from": ["<uuid>"] },
+  "resolution": { "steps": ["step 1", ...], "command": "...", "language": "bash", "verify": "...", "cited_from": ["<uuid>"] },
+  "prevention":   ["..."],
+  "insights":     [ { "text": "...", "cited_from": ["<uuid>"] } ],
+  "diagrams": [
+    { "type": "flowchart|sequenceDiagram|stateDiagram-v2|timeline|erDiagram|classDiagram",
+      "title": "optional heading", "mermaid": "raw source, no fences",
+      "cited_from": ["<uuid>"] }
+  ],
+  "code_blocks":  [ { "language": "go", "content": "...", "purpose": "...", "cited_from": [...] } ],
+  "references":   [ { "url": "https://...", "anchor": "text", "purpose": "..." } ],
+  "further_study":  ["..."],
+  "open_questions": ["..."]
+}
+` + "```" + `
+
+`)
+
+	// Facts inventory
+	if len(facts) > 0 {
+		b.WriteString("## Facts inventory (from extraction phase)\n\n")
+		var lastMsg string
+		for _, f := range facts {
+			if f.MessageID != lastMsg {
+				fmt.Fprintf(&b, "\n[msg %s]\n", f.MessageID)
+				lastMsg = f.MessageID
+			}
+			fmt.Fprintf(&b, "  - [%s / %s] %s\n", f.Category, f.Importance, f.Text)
+		}
+		b.WriteString("\n")
+	}
+
+	// Transcript
+	b.WriteString("## Transcript\n\n")
+	for _, m := range c.Messages {
+		fmt.Fprintf(&b, "--- [%s] role=%s @ %s ---\n%s\n\n",
+			m.ID, m.Role, m.CreatedAt.Format("2006-01-02 15:04:05"), m.Content)
+	}
+	b.WriteString("\n## Ready\n\nCompose the Summary JSON and call `synthesize_to_notion`.\n")
+	return b.String()
+}

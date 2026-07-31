@@ -214,9 +214,33 @@ Structured (`StructuredContent`):
 }
 ```
 
-## Notion synthesis (v0.2.0)
+## Notion synthesis (v0.3.0 — multi-pass with coverage guarantee)
 
-After each conversation, chatmem can auto-publish a **structured, concept-organized Notion page** — a study-mode page for learning conversations, or a debug-mode page for problem-solving sessions. The pages are optimized for revision: TL;DR at the top, Mermaid diagrams for anything with structure or flow, citations back to the original messages, full transcript collapsed at the bottom.
+After each conversation, chatmem publishes a **structured, concept-organized Notion page** — a study-mode page for learning conversations, or a debug-mode page for problem-solving sessions. The pages are optimized for revision: TL;DR at the top, Mermaid diagrams for anything with structure or flow, citations back to the original messages, full transcript collapsed at the bottom.
+
+**v0.3.0 quality guarantees:** the LLM extracts atomic facts from every message first, then composes the Summary from that inventory. Chatmem refuses to write to Notion unless the Summary cites ≥ 95% of the messages that carry non-trivia facts. Result: no message silently dropped, even in a 4-hour, 200-message session.
+
+```
+suggest_synthesize=true triggers the client-side LLM to run:
+
+┌─ Phase 1: extract facts ──────────────────────────┐
+│  get_extraction_prompt → chunk of unextracted    │
+│  record_facts          → store, return remaining │
+│  loop until extraction_complete=true             │
+└──────────────────────┬────────────────────────────┘
+                       ▼
+┌─ Phase 2: compose Summary ────────────────────────┐
+│  get_synthesis_prompt → transcript + facts +     │
+│                          schema + quality rules   │
+└──────────────────────┬────────────────────────────┘
+                       ▼
+┌─ Phase 3: publish (coverage-gated) ───────────────┐
+│  synthesize_to_notion → validates + writes to     │
+│                          Notion, OR returns list  │
+│                          of missed msg uuids for  │
+│                          the LLM to fix and retry │
+└───────────────────────────────────────────────────┘
+```
 
 ### Setup (once)
 
@@ -248,6 +272,14 @@ Session type is auto-classified per conversation. Diagrams are required (validat
 ```bash
 chatmem notion sample --type=study    # prints Summary JSON + rendered blocks JSON
 chatmem notion sample --type=debug
+```
+
+### Inspect coverage
+
+```bash
+chatmem notion coverage <conversation_id>
+# → total messages, messages with facts, category breakdown,
+#   msgs without any fact yet
 ```
 
 ### Reliability

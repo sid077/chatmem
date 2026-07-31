@@ -69,3 +69,25 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_message_at           TIM
 CREATE INDEX IF NOT EXISTS conversations_needs_synth_idx
     ON conversations (last_message_at)
     WHERE messages_since_last_synth > 0;
+
+-- v0.3.0: multi-pass synthesis with coverage guarantees. Atomic facts
+-- extracted from each message are stored here; the summary must cite
+-- (via cited_from) every message with at least one non-trivia fact.
+CREATE TABLE IF NOT EXISTS synth_facts (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    message_id      UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    -- concept | decision | command | error | reference | question | code | diagram-hint | insight
+    category        TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    -- critical | normal | trivial. trivia is excluded from coverage requirement.
+    importance      TEXT NOT NULL DEFAULT 'normal',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS synth_facts_conv_idx ON synth_facts (conversation_id);
+CREATE INDEX IF NOT EXISTS synth_facts_msg_idx  ON synth_facts (message_id);
+
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_coverage_ratio  NUMERIC;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_covered_msg_ids UUID[];
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_missed_msg_ids  UUID[];

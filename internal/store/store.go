@@ -249,6 +249,232 @@ func (s *Store) GetSynthContext(ctx context.Context, convID uuid.UUID) (SynthCon
 	return out, rows.Err()
 }
 
+// FactIn is one atomic fact extracted from a message. Category and
+// importance are LLM judgments; chatmem does not interpret them beyond
+// coverage bookkeeping.
+type FactIn struct {
+	MessageID  uuid.UUID
+	Category   string // concept | decision | command | error | reference | question | code | diagram-hint | insight
+	Text       string
+	Importance string // critical | normal | trivial
+}
+
+// Fact is a stored fact row.
+type Fact struct {
+	ID             uuid.UUID
+	ConversationID uuid.UUID
+	MessageID      uuid.UUID
+	Category       string
+	Text           string
+	Importance     string
+	CreatedAt      time.Time
+}
+
+// RecordFacts bulk-inserts facts for a conversation in one transaction.
+// Facts are additive — calling twice for the same message stacks facts;
+// dedup is the LLM's job.
+func (s *Store) RecordFacts(ctx context.Context, convID uuid.UUID, in []FactIn) error {
+	if len(in) == 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for i, f := range in {
+		if f.MessageID == uuid.Nil || f.Category == "" || strings.TrimSpace(f.Text) == "" {
+			return fmt.Errorf("facts[%d]: message_id, category, text are required", i)
+		}
+		imp := f.Importance
+		if imp == "" {
+			imp = "normal"
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO synth_facts (conversation_id, message_id, category, text, importance)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			convID, f.MessageID, f.Category, f.Text, imp); err != nil {
+			return fmt.Errorf("insert fact %d: %w", i, err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// GetFacts returns every fact for a conversation ordered by (message
+// created_at, fact created_at) so the LLM sees them chronologically.
+func (s *Store) GetFacts(ctx context.Context, convID uuid.UUID) ([]Fact, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT f.id, f.conversation_id, f.message_id, f.category, f.text, f.importance, f.created_at
+		 FROM synth_facts f
+		 JOIN messages m ON m.id = f.message_id
+		 WHERE f.conversation_id = $1
+		 ORDER BY m.created_at ASC, f.created_at ASC`, convID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Fact
+	for rows.Next() {
+		var f Fact
+		if err := rows.Scan(&f.ID, &f.ConversationID, &f.MessageID, &f.Category, &f.Text, &f.Importance, &f.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// UnextractedMessages returns messages that don't yet have any fact.
+// Used by the chunked extraction loop.
+func (s *Store) UnextractedMessages(ctx context.Context, convID uuid.UUID, limit int) ([]Message, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 40
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT m.id, m.role, m.content, m.tool_calls, m.token_count, m.created_at
+		 FROM messages m
+		 WHERE m.conversation_id = $1
+		   AND NOT EXISTS (SELECT 1 FROM synth_facts f WHERE f.message_id = m.id)
+		 ORDER BY m.created_at ASC
+		 LIMIT $2`, convID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// CoverageReport is what coverage checks return.
+type CoverageReport struct {
+	TotalMessages       int
+	MessagesWithFacts   int
+	MessagesRequiringCitation int      // = non-trivia fact messages, or all messages if no facts extracted
+	CitedMessages       int
+	MissedMessageIDs    []uuid.UUID // non-trivia msgs not in cited_from
+	Ratio               float64     // CitedMessages / MessagesRequiringCitation
+	FactCounts          map[string]int // category -> count
+}
+
+// MessageCoverage compares the caller-supplied set of cited message ids
+// against the set of messages that carry at least one non-trivia fact
+// (or all messages, if no facts were extracted yet).
+func (s *Store) MessageCoverage(ctx context.Context, convID uuid.UUID, cited []uuid.UUID) (CoverageReport, error) {
+	var report CoverageReport
+	report.FactCounts = map[string]int{}
+
+	// Total messages
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM messages WHERE conversation_id = $1`, convID).
+		Scan(&report.TotalMessages); err != nil {
+		return report, err
+	}
+
+	// Messages with any fact + category counts
+	rows, err := s.pool.Query(ctx,
+		`SELECT category, count(*) FROM synth_facts WHERE conversation_id = $1 GROUP BY category`, convID)
+	if err != nil {
+		return report, err
+	}
+	for rows.Next() {
+		var cat string
+		var n int
+		if err := rows.Scan(&cat, &n); err != nil {
+			rows.Close()
+			return report, err
+		}
+		report.FactCounts[cat] = n
+	}
+	rows.Close()
+
+	// The set of messages that require citation:
+	//   - if any facts exist: messages with at least one non-trivia fact
+	//   - if no facts: all messages
+	requiredRows, err := s.pool.Query(ctx,
+		`WITH nontrivia AS (
+		    SELECT DISTINCT message_id FROM synth_facts
+		    WHERE conversation_id = $1 AND importance <> 'trivial'
+		 )
+		 SELECT id FROM messages
+		 WHERE conversation_id = $1
+		   AND (
+		     (SELECT count(*) FROM synth_facts WHERE conversation_id = $1) = 0
+		     OR id IN (SELECT message_id FROM nontrivia)
+		   )`, convID)
+	if err != nil {
+		return report, err
+	}
+	required := map[uuid.UUID]bool{}
+	for requiredRows.Next() {
+		var id uuid.UUID
+		if err := requiredRows.Scan(&id); err != nil {
+			requiredRows.Close()
+			return report, err
+		}
+		required[id] = true
+	}
+	requiredRows.Close()
+	report.MessagesRequiringCitation = len(required)
+
+	// Messages with facts (any importance)
+	if err := s.pool.QueryRow(ctx,
+		`SELECT count(DISTINCT message_id) FROM synth_facts WHERE conversation_id = $1`, convID).
+		Scan(&report.MessagesWithFacts); err != nil {
+		return report, err
+	}
+
+	// Coverage
+	citedSet := map[uuid.UUID]bool{}
+	for _, id := range cited {
+		citedSet[id] = true
+	}
+	for id := range required {
+		if citedSet[id] {
+			report.CitedMessages++
+		} else {
+			report.MissedMessageIDs = append(report.MissedMessageIDs, id)
+		}
+	}
+	if report.MessagesRequiringCitation == 0 {
+		report.Ratio = 1.0
+	} else {
+		report.Ratio = float64(report.CitedMessages) / float64(report.MessagesRequiringCitation)
+	}
+	return report, nil
+}
+
+// RecordCoverage persists the coverage snapshot to the conversation row so
+// `chatmem notion coverage <id>` can show what was included / missed.
+func (s *Store) RecordCoverage(ctx context.Context, convID uuid.UUID, r CoverageReport) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE conversations
+		    SET notion_coverage_ratio = $2,
+		        notion_covered_msg_ids = $3,
+		        notion_missed_msg_ids = $4
+		  WHERE id = $1`,
+		convID, r.Ratio,
+		coverageIDs(r.MessagesRequiringCitation, r.MissedMessageIDs, /*covered=*/ true),
+		r.MissedMessageIDs)
+	return err
+}
+
+// coverageIDs is a helper that returns the caller-friendly slice for the
+// covered_msg_ids column. Currently we only persist missed; covered is
+// derived on read to keep the row small.
+func coverageIDs(_ int, missed []uuid.UUID, covered bool) []uuid.UUID {
+	if covered {
+		return nil // not persisted directly; missed is enough
+	}
+	return missed
+}
+
 // ConversationsNeedingSynth returns conversations past the auto-fire threshold,
 // used by the background sweep to build the stale-synth log.
 type NeedsSynth struct {

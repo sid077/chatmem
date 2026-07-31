@@ -325,3 +325,188 @@ func remarshal(src any, dst any) error {
 	}
 	return json.Unmarshal(data, dst)
 }
+
+// TestMultiPassCoverageGate is the v0.3.0 end-to-end: extract facts, then
+// call synthesize_to_notion with a Summary that leaves some messages
+// uncited. Coverage gate must refuse the write and list the missed msg
+// uuids. Then a corrected Summary that cites everything succeeds.
+func TestMultiPassCoverageGate(t *testing.T) {
+	tmp := t.TempDir()
+	pg := chatpg.New(chatpg.Config{
+		DataDir:    filepath.Join(tmp, "data"),
+		RuntimeDir: filepath.Join(tmp, "runtime"),
+		Port:       54339,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := pg.Start(ctx); err != nil {
+		t.Fatalf("start pg: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.Stop() })
+
+	st := store.New(pg.Pool())
+	if err := st.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	notionMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/v1/users/me":
+			w.Write([]byte(`{"id":"u","name":"n","type":"bot"}`))
+		case r.URL.Path == "/v1/pages":
+			w.Write([]byte(`{"id":"pg","url":"https://www.notion.so/pg"}`))
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer notionMock.Close()
+	_ = notion.SaveConfig(tmp, notion.Config{
+		IntegrationToken: "t", ParentPageID: "p", ConnectedAt: time.Now(),
+		AutoSynthesize: notion.DefaultAuto(),
+	})
+	writer, _ := notion.NewWriter(tmp, notionMock.URL)
+
+	server := chatmcp.NewServer(chatmcp.Deps{Store: st, NotionWriter: writer, Version: "test"})
+	client := sdk.NewClient(&sdk.Implementation{Name: "t"}, nil)
+	t1, t2 := sdk.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, t1, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	session, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer session.Close()
+
+	// Seed 4 messages
+	var msgIDs []string
+	var convID string
+	for i, content := range []string{"what is hnsw", "graph-based ANN", "pgvector defaults?", "m=16 ef_construction=64"} {
+		args := map[string]any{
+			"role":    map[int]string{0: "user", 1: "assistant", 2: "user", 3: "assistant"}[i],
+			"content": content,
+		}
+		if convID == "" {
+			args["model"] = "m"
+			args["provider"] = "p"
+			args["client_id"] = "c"
+		} else {
+			args["conversation_id"] = convID
+		}
+		rec, err := session.CallTool(ctx, &sdk.CallToolParams{Name: "record_message", Arguments: args})
+		if err != nil || rec.IsError {
+			t.Fatalf("record_message %d: %v %v", i, err, rec.Content)
+		}
+		var r struct {
+			MessageID      string `json:"message_id"`
+			ConversationID string `json:"conversation_id"`
+		}
+		_ = remarshal(rec.StructuredContent, &r)
+		msgIDs = append(msgIDs, r.MessageID)
+		convID = r.ConversationID
+	}
+
+	// Extract facts for the first 2 messages only.
+	factsCall, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "record_facts",
+		Arguments: map[string]any{
+			"conversation_id": convID,
+			"facts": []map[string]any{
+				{"message_id": msgIDs[0], "category": "question", "text": "asked about HNSW", "importance": "normal"},
+				{"message_id": msgIDs[1], "category": "concept", "text": "HNSW is graph-based ANN", "importance": "normal"},
+			},
+		},
+	})
+	if err != nil || factsCall.IsError {
+		t.Fatalf("record_facts: %v %s", err, firstText(factsCall.Content))
+	}
+	var frOut struct {
+		UnextractedMessages int `json:"unextracted_messages"`
+	}
+	_ = remarshal(factsCall.StructuredContent, &frOut)
+	if frOut.UnextractedMessages != 2 {
+		t.Fatalf("expected 2 unextracted, got %d", frOut.UnextractedMessages)
+	}
+
+	// Attempt synth with a Summary that only cites msgIDs[0] and [1] — msgs
+	// [2] and [3] have no facts (trivia excluded), so if we DON'T extract
+	// for them, coverage will still be measured against only the 2 with
+	// facts. That's a 100% ratio when only [0] and [1] are cited. To force
+	// a failure we now extract facts for [2] and [3] first.
+	factsCall2, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "record_facts",
+		Arguments: map[string]any{
+			"conversation_id": convID,
+			"facts": []map[string]any{
+				{"message_id": msgIDs[2], "category": "question", "text": "asked about defaults", "importance": "normal"},
+				{"message_id": msgIDs[3], "category": "reference", "text": "m=16 ef_construction=64", "importance": "critical"},
+			},
+		},
+	})
+	if err != nil || factsCall2.IsError {
+		t.Fatalf("record_facts round 2: %v %s", err, firstText(factsCall2.Content))
+	}
+
+	// Now synth with Summary that cites only msgIDs[0] and [1] — that's 2/4 = 50%,
+	// below default 95% → refuse.
+	underCovered := map[string]any{
+		"title":        "Partial HNSW notes",
+		"session_type": "study",
+		"tldr":         []string{"one"},
+		"concepts": []map[string]any{{
+			"heading":    "HNSW",
+			"definition": "graph-based ANN",
+			"body":       "b",
+			"cited_from": []string{msgIDs[0], msgIDs[1]},
+		}},
+		"diagrams": []map[string]any{{"type": "flowchart", "mermaid": "A-->B"}},
+	}
+	call, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "synthesize_to_notion",
+		Arguments: map[string]any{
+			"conversation_id": convID,
+			"summary":         underCovered,
+		},
+	})
+	if err != nil {
+		t.Fatalf("synth call: %v", err)
+	}
+	if !call.IsError {
+		t.Fatalf("expected coverage refusal, got success: %s", firstText(call.Content))
+	}
+	txt := firstText(call.Content)
+	if !strings.Contains(txt, "Coverage") || !strings.Contains(txt, msgIDs[3]) {
+		t.Fatalf("expected error to list missed uuid %s in coverage message; got:\n%s", msgIDs[3], txt)
+	}
+
+	// Retry with full coverage.
+	full := underCovered
+	full["concepts"] = []map[string]any{{
+		"heading":    "HNSW",
+		"definition": "graph-based ANN with m=16 ef=64 defaults",
+		"body":       "b",
+		"cited_from": []string{msgIDs[0], msgIDs[1], msgIDs[2], msgIDs[3]},
+	}}
+	call2, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "synthesize_to_notion",
+		Arguments: map[string]any{
+			"conversation_id": convID,
+			"summary":         full,
+		},
+	})
+	if err != nil {
+		t.Fatalf("second synth: %v", err)
+	}
+	if call2.IsError {
+		t.Fatalf("expected success at 100%% coverage: %s", firstText(call2.Content))
+	}
+	var okOut struct {
+		NotionURL string  `json:"notion_url"`
+		Coverage  float64 `json:"coverage"`
+	}
+	_ = remarshal(call2.StructuredContent, &okOut)
+	if okOut.NotionURL == "" || okOut.Coverage < 0.99 {
+		t.Fatalf("bad structured out: %+v", okOut)
+	}
+}

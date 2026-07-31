@@ -29,8 +29,66 @@ func newNotionCmd() *cobra.Command {
 		notionListCmd(),
 		notionResyncCmd(),
 		notionSampleCmd(),
+		notionCoverageCmd(),
 	)
 	return cmd
+}
+
+func notionCoverageCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "coverage <conversation_id>",
+		Short: "Show the multi-pass synthesis coverage report for a conversation",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := requireNonRoot(); err != nil {
+				return err
+			}
+			if err := preflight(); err != nil {
+				return err
+			}
+			convID, err := uuid.Parse(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid conversation id: %w", err)
+			}
+			s, cleanup, err := openStore(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			// Recompute coverage against currently-cited messages (from
+			// stored facts + last synth's Summary). For the CLI report we
+			// take the stored missed_msg_ids column as-is.
+			facts, err := s.GetFacts(cmd.Context(), convID)
+			if err != nil {
+				return err
+			}
+			rep, err := s.MessageCoverage(cmd.Context(), convID, nil)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("conversation: %s\n", convID)
+			fmt.Printf("total messages:               %d\n", rep.TotalMessages)
+			fmt.Printf("messages with any fact:       %d\n", rep.MessagesWithFacts)
+			fmt.Printf("messages requiring citation:  %d\n", rep.MessagesRequiringCitation)
+			fmt.Printf("total facts recorded:         %d\n", len(facts))
+			if len(rep.FactCounts) > 0 {
+				fmt.Println("fact categories:")
+				for cat, n := range rep.FactCounts {
+					fmt.Printf("  %-14s %d\n", cat, n)
+				}
+			}
+			if rep.MessagesRequiringCitation > 0 {
+				fmt.Printf("citation coverage (of new run):  0/%d  (0.0%%)  — pass a Summary to compute a real ratio\n", rep.MessagesRequiringCitation)
+			}
+			if len(rep.MissedMessageIDs) > 0 {
+				fmt.Printf("\nmessages without any fact yet (%d):\n", len(rep.MissedMessageIDs))
+				for _, id := range rep.MissedMessageIDs {
+					fmt.Printf("  %s\n", id)
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func notionConnectCmd() *cobra.Command {

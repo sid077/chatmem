@@ -147,6 +147,44 @@
       "annotations": { "destructiveHint": false, "idempotentHint": true, "readOnlyHint": true, "openWorldHint": false }
     },
     {
+      "name": "get_extraction_prompt",
+      "description": "Phase 1 of multi-pass synthesis. Returns the next chunk of unextracted messages plus a brief telling the LLM to emit atomic facts (category + text + importance) via record_facts. Loop until extraction_complete=true, then call get_synthesis_prompt.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "conversation_id": { "type": "string", "description": "UUID of the conversation to extract facts from" },
+          "chunk_size":      { "type": "integer", "description": "max messages per chunk (default 40, max 200)" }
+        },
+        "required": ["conversation_id"]
+      },
+      "annotations": { "destructiveHint": false, "idempotentHint": true, "readOnlyHint": true, "openWorldHint": false }
+    },
+    {
+      "name": "record_facts",
+      "description": "Phase 1 write. Bulk-store atomic facts extracted from a chunk. Returns how many messages remain unextracted.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "conversation_id": { "type": "string" },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message_id": { "type": "string" },
+                "category":   { "type": "string", "description": "concept | decision | command | error | reference | question | code | diagram-hint | insight" },
+                "text":       { "type": "string" },
+                "importance": { "type": "string", "description": "critical | normal | trivial" }
+              },
+              "required": ["message_id", "category", "text"]
+            }
+          }
+        },
+        "required": ["conversation_id", "facts"]
+      },
+      "annotations": { "destructiveHint": false, "idempotentHint": false, "readOnlyHint": false, "openWorldHint": false }
+    },
+    {
       "name": "get_synthesis_prompt",
       "description": "Return the full brief the LLM should follow to compose a Summary payload for synthesize_to_notion. Includes transcript + JSON schema + quality rules + message UUIDs to cite.",
       "inputSchema": {

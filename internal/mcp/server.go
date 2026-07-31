@@ -33,6 +33,8 @@ func NewServer(d Deps) *sdk.Server {
 	registerRecordMessage(s, d)
 	registerGetConversation(s, d.Store, d.Aggregator)
 	registerSearchHistory(s, d.Store, d.Aggregator)
+	registerGetExtractionPrompt(s, d)
+	registerRecordFacts(s, d)
 	registerGetSynthesisPrompt(s, d)
 	registerSynthesizeToNotion(s, d)
 	registerListNotionPages(s, d)
@@ -426,7 +428,23 @@ func registerGetSynthesisPrompt(s *sdk.Server, d Deps) {
 				ID: m.ID.String(), Role: m.Role, Content: m.Content, CreatedAt: m.CreatedAt,
 			})
 		}
-		prompt := notion.BuildSynthesisPrompt(pc)
+		// v0.3.0: pull extracted facts (if any) and pass them into the
+		// prompt. If no facts were extracted the prompt says so and warns
+		// that coverage will be strict.
+		facts, err := d.Store.GetFacts(ctx, convID)
+		if err != nil {
+			return nil, getSynthesisPromptOut{}, err
+		}
+		frecs := make([]notion.FactRecord, 0, len(facts))
+		for _, f := range facts {
+			frecs = append(frecs, notion.FactRecord{
+				MessageID:  f.MessageID.String(),
+				Category:   f.Category,
+				Text:       f.Text,
+				Importance: f.Importance,
+			})
+		}
+		prompt := notion.BuildSynthesisPromptWithFacts(pc, frecs)
 		out := getSynthesisPromptOut{
 			Prompt:         prompt,
 			ConversationID: convID.String(),
@@ -434,6 +452,184 @@ func registerGetSynthesisPrompt(s *sdk.Server, d Deps) {
 		}
 		return &sdk.CallToolResult{
 			Content: []sdk.Content{&sdk.TextContent{Text: prompt}},
+		}, out, nil
+	})
+}
+
+// ─── v0.3.0: multi-pass extraction ─────────────────────────────────────
+
+type getExtractionArgs struct {
+	ConversationID string `json:"conversation_id" jsonschema:"UUID of the conversation to extract facts from"`
+	ChunkSize      int    `json:"chunk_size,omitempty" jsonschema:"max messages per chunk (default 40, max 200)"`
+}
+
+type getExtractionOut struct {
+	Prompt                string `json:"prompt"`
+	ConversationID        string `json:"conversation_id"`
+	ChunkMessages         int    `json:"chunk_messages"`
+	Remaining             int    `json:"remaining"`
+	TotalMessages         int    `json:"total_messages"`
+	AlreadyExtractedFacts int    `json:"already_extracted_facts"`
+	Complete              bool   `json:"complete"` // no more chunks — proceed to get_synthesis_prompt
+}
+
+func registerGetExtractionPrompt(s *sdk.Server, d Deps) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "get_extraction_prompt",
+		Description: "Phase 1 of multi-pass synthesis. Returns the next chunk of unextracted messages plus a brief telling the LLM to emit atomic facts (category + text + importance) via record_facts. Call in a loop until 'complete' is true, THEN call get_synthesis_prompt. Enables coverage guarantees for the resulting Notion page.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args getExtractionArgs) (*sdk.CallToolResult, getExtractionOut, error) {
+		if d.NotionWriter == nil {
+			return nil, getExtractionOut{}, fmt.Errorf("notion integration is not configured")
+		}
+		convID, err := uuid.Parse(args.ConversationID)
+		if err != nil {
+			return nil, getExtractionOut{}, fmt.Errorf("invalid conversation_id: %w", err)
+		}
+		sc, err := d.Store.GetSynthContext(ctx, convID)
+		if err != nil {
+			return nil, getExtractionOut{}, err
+		}
+		if len(sc.Messages) == 0 {
+			return nil, getExtractionOut{}, fmt.Errorf("conversation %s has no messages", convID)
+		}
+		facts, err := d.Store.GetFacts(ctx, convID)
+		if err != nil {
+			return nil, getExtractionOut{}, err
+		}
+		chunk, err := d.Store.UnextractedMessages(ctx, convID, args.ChunkSize)
+		if err != nil {
+			return nil, getExtractionOut{}, err
+		}
+		total := len(sc.Messages)
+		remaining := 0
+		// Recompute remaining post-chunk: total - (messages_with_facts) - chunk-size
+		msgIDsWithFacts := map[uuid.UUID]bool{}
+		for _, f := range facts {
+			msgIDsWithFacts[f.MessageID] = true
+		}
+		haveFactCount := len(msgIDsWithFacts)
+		remaining = total - haveFactCount - len(chunk)
+		if remaining < 0 {
+			remaining = 0
+		}
+		if len(chunk) == 0 {
+			out := getExtractionOut{
+				ConversationID: convID.String(),
+				Complete:       true,
+				TotalMessages:  total,
+				AlreadyExtractedFacts: len(facts),
+			}
+			text := fmt.Sprintf("Extraction complete: %d messages, %d facts already recorded. Proceed to get_synthesis_prompt for %s.",
+				total, len(facts), convID)
+			return &sdk.CallToolResult{
+				Content: []sdk.Content{&sdk.TextContent{Text: text}},
+			}, out, nil
+		}
+		promptMsgs := make([]notion.PromptMessage, 0, len(chunk))
+		for _, m := range chunk {
+			promptMsgs = append(promptMsgs, notion.PromptMessage{
+				ID: m.ID.String(), Role: m.Role, Content: m.Content, CreatedAt: m.CreatedAt,
+			})
+		}
+		prompt := notion.BuildExtractionPrompt(notion.ExtractionInput{
+			ConversationID:        convID.String(),
+			Model:                 sc.Model,
+			Provider:              sc.Provider,
+			ClientID:              sc.ClientID,
+			Messages:              promptMsgs,
+			TotalMessages:         total,
+			AlreadyExtractedFacts: len(facts),
+			Remaining:             remaining,
+		})
+		out := getExtractionOut{
+			Prompt:                prompt,
+			ConversationID:        convID.String(),
+			ChunkMessages:         len(chunk),
+			Remaining:             remaining,
+			TotalMessages:         total,
+			AlreadyExtractedFacts: len(facts),
+			Complete:              false,
+		}
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: prompt}},
+		}, out, nil
+	})
+}
+
+type factIn struct {
+	MessageID  string `json:"message_id" jsonschema:"uuid of the source message from the transcript"`
+	Category   string `json:"category" jsonschema:"concept | decision | command | error | reference | question | code | diagram-hint | insight"`
+	Text       string `json:"text" jsonschema:"the atomic fact (verbatim quote when it's a command/error/exact number)"`
+	Importance string `json:"importance,omitempty" jsonschema:"critical | normal | trivial (default normal)"`
+}
+
+type recordFactsArgs struct {
+	ConversationID string   `json:"conversation_id" jsonschema:"UUID of the conversation"`
+	Facts          []factIn `json:"facts" jsonschema:"atomic facts to store; one message can contribute multiple"`
+}
+
+type recordFactsOut struct {
+	Inserted              int  `json:"inserted"`
+	TotalFacts            int  `json:"total_facts"`
+	UnextractedMessages   int  `json:"unextracted_messages"`
+	ExtractionComplete    bool `json:"extraction_complete"`
+	NextStep              string `json:"next_step"`
+}
+
+func registerRecordFacts(s *sdk.Server, d Deps) {
+	sdk.AddTool(s, &sdk.Tool{
+		Name:        "record_facts",
+		Description: "Phase 1 write: bulk-store atomic facts extracted from a chunk. Returns how many messages remain unextracted so the LLM knows whether to loop back to get_extraction_prompt or advance to get_synthesis_prompt.",
+	}, func(ctx context.Context, _ *sdk.CallToolRequest, args recordFactsArgs) (*sdk.CallToolResult, recordFactsOut, error) {
+		if d.NotionWriter == nil {
+			return nil, recordFactsOut{}, fmt.Errorf("notion integration is not configured")
+		}
+		convID, err := uuid.Parse(args.ConversationID)
+		if err != nil {
+			return nil, recordFactsOut{}, fmt.Errorf("invalid conversation_id: %w", err)
+		}
+		if len(args.Facts) == 0 {
+			return nil, recordFactsOut{}, fmt.Errorf("facts array is empty")
+		}
+		in := make([]store.FactIn, 0, len(args.Facts))
+		for i, f := range args.Facts {
+			mid, err := uuid.Parse(f.MessageID)
+			if err != nil {
+				return nil, recordFactsOut{}, fmt.Errorf("facts[%d].message_id %q is not a valid UUID: %w", i, f.MessageID, err)
+			}
+			imp := f.Importance
+			if imp == "" {
+				imp = "normal"
+			}
+			in = append(in, store.FactIn{
+				MessageID: mid, Category: f.Category, Text: f.Text, Importance: imp,
+			})
+		}
+		if err := d.Store.RecordFacts(ctx, convID, in); err != nil {
+			return nil, recordFactsOut{}, err
+		}
+		total, err := d.Store.GetFacts(ctx, convID)
+		if err != nil {
+			return nil, recordFactsOut{}, err
+		}
+		remaining, err := d.Store.UnextractedMessages(ctx, convID, 200)
+		if err != nil {
+			return nil, recordFactsOut{}, err
+		}
+		out := recordFactsOut{
+			Inserted:            len(in),
+			TotalFacts:          len(total),
+			UnextractedMessages: len(remaining),
+			ExtractionComplete:  len(remaining) == 0,
+		}
+		if out.ExtractionComplete {
+			out.NextStep = fmt.Sprintf("Extraction complete. Call get_synthesis_prompt for conversation %s.", convID)
+		} else {
+			out.NextStep = fmt.Sprintf("Call get_extraction_prompt again for conversation %s (%d messages remain).", convID, len(remaining))
+		}
+		return &sdk.CallToolResult{
+			Content: []sdk.Content{&sdk.TextContent{Text: fmt.Sprintf(
+				"Recorded %d facts (total now %d). %s", len(in), len(total), out.NextStep)}},
 		}, out, nil
 	})
 }
@@ -447,15 +643,62 @@ type synthesizeArgs struct {
 	ConversationID string         `json:"conversation_id" jsonschema:"UUID of the conversation"`
 	Summary        notion.Summary `json:"summary" jsonschema:"structured Summary object matching the schema in get_synthesis_prompt"`
 	Force          bool           `json:"force,omitempty" jsonschema:"true = rewrite the Notion page even if the summary hash is unchanged"`
+	MinCoverage    float64        `json:"min_coverage,omitempty" jsonschema:"require this fraction of messages-with-facts to be cited (default 0.95)"`
 }
 
 type synthesizeOut struct {
-	ConversationID string `json:"conversation_id"`
-	NotionPageID   string `json:"notion_page_id"`
-	NotionURL      string `json:"notion_url"`
-	Skipped        bool   `json:"skipped,omitempty"`
-	Version        int    `json:"version"`
-	SessionType    string `json:"session_type"`
+	ConversationID string   `json:"conversation_id"`
+	NotionPageID   string   `json:"notion_page_id,omitempty"`
+	NotionURL      string   `json:"notion_url,omitempty"`
+	Skipped        bool     `json:"skipped,omitempty"`
+	Version        int      `json:"version,omitempty"`
+	SessionType    string   `json:"session_type,omitempty"`
+	Coverage       float64  `json:"coverage"`
+	MissedMessages []string `json:"missed_message_ids,omitempty"`
+}
+
+// defaultMinCoverage is the fraction of non-trivia messages that must
+// appear in Summary.cited_from (any section). Below this → write refused.
+const defaultMinCoverage = 0.95
+
+// collectCitedUUIDs walks every section of a Summary and returns the union
+// of message UUIDs referenced in cited_from. Used by the coverage gate.
+func collectCitedUUIDs(s *notion.Summary) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	add := func(ids []string) {
+		for _, id := range ids {
+			u, err := uuid.Parse(id)
+			if err == nil {
+				seen[u] = true
+			}
+		}
+	}
+	for _, c := range s.Concepts {
+		add(c.CitedFrom)
+	}
+	for _, a := range s.Attempts {
+		add(a.CitedFrom)
+	}
+	if s.RootCause != nil {
+		add(s.RootCause.CitedFrom)
+	}
+	if s.Resolution != nil {
+		add(s.Resolution.CitedFrom)
+	}
+	for _, ins := range s.Insights {
+		add(ins.CitedFrom)
+	}
+	for _, d := range s.Diagrams {
+		add(d.CitedFrom)
+	}
+	for _, cb := range s.CodeBlocks {
+		add(cb.CitedFrom)
+	}
+	out := make([]uuid.UUID, 0, len(seen))
+	for u := range seen {
+		out = append(out, u)
+	}
+	return out
 }
 
 func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
@@ -488,6 +731,41 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 		}
 		if err := summary.Validate(validUUIDs); err != nil {
 			return nil, synthesizeOut{}, err
+		}
+
+		// v0.3.0 coverage gate — every message with a non-trivia fact must
+		// appear in at least one Summary section's cited_from. Below the
+		// threshold → refuse the write and return the missed msg ids so
+		// the LLM can extend the Summary and retry.
+		minCov := args.MinCoverage
+		if minCov <= 0 {
+			minCov = defaultMinCoverage
+		}
+		cited := collectCitedUUIDs(&summary)
+		report, err := d.Store.MessageCoverage(ctx, convID, cited)
+		if err != nil {
+			return nil, synthesizeOut{}, err
+		}
+		if report.Ratio < minCov {
+			missed := make([]string, 0, len(report.MissedMessageIDs))
+			for _, id := range report.MissedMessageIDs {
+				missed = append(missed, id.String())
+			}
+			out := synthesizeOut{
+				ConversationID: convID.String(),
+				Coverage:       report.Ratio,
+				MissedMessages: missed,
+			}
+			text := fmt.Sprintf(
+				"Coverage %.1f%% is below required %.1f%%. %d of %d messages that need citation are missing from your Summary's cited_from lists.\n\nMissed message uuids (add them to concepts/attempts/insights/etc so they're cited):\n  %s\n\nThen call synthesize_to_notion again with the updated Summary.",
+				report.Ratio*100, minCov*100, len(missed), report.MessagesRequiringCitation, strings.Join(missed, "\n  "))
+			// Return via IsError:true (NOT a Go error) so the client's LLM
+			// sees the full missed-uuid list in Content. Returning a Go
+			// error causes the SDK to drop the detailed content.
+			return &sdk.CallToolResult{
+				IsError: true,
+				Content: []sdk.Content{&sdk.TextContent{Text: text}},
+			}, out, nil
 		}
 
 		// Build transcript for the "Full Transcript" section.
@@ -529,6 +807,11 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 		}); err != nil {
 			return nil, synthesizeOut{}, fmt.Errorf("notion page written, but failed to persist state locally: %w", err)
 		}
+		// Persist coverage snapshot so `chatmem notion coverage <id>` works.
+		if err := d.Store.RecordCoverage(ctx, convID, report); err != nil {
+			// Non-fatal — page is written, coverage bookkeeping just failed.
+			_ = err
+		}
 
 		out := synthesizeOut{
 			ConversationID: convID.String(),
@@ -537,16 +820,18 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 			Skipped:        res.Skipped,
 			Version:        version,
 			SessionType:    string(summary.SessionType),
+			Coverage:       report.Ratio,
 		}
 
 		text := ""
+		covPct := report.Ratio * 100
 		if res.Skipped {
-			text = fmt.Sprintf("Skipped — summary hash unchanged since last synthesis.\nPage: %s", out.NotionURL)
+			text = fmt.Sprintf("Skipped — summary hash unchanged since last synthesis. Coverage %.1f%%.\nPage: %s", covPct, out.NotionURL)
 		} else if sc.NotionPageID == "" {
-			text = fmt.Sprintf("Created Notion page (session_type=%s):\n%s", summary.SessionType, out.NotionURL)
+			text = fmt.Sprintf("Created Notion page (session_type=%s, coverage %.1f%%):\n%s", summary.SessionType, covPct, out.NotionURL)
 		} else {
-			text = fmt.Sprintf("Updated Notion page to version %d (session_type=%s):\n%s",
-				version, summary.SessionType, out.NotionURL)
+			text = fmt.Sprintf("Updated Notion page to version %d (session_type=%s, coverage %.1f%%):\n%s",
+				version, summary.SessionType, covPct, out.NotionURL)
 		}
 		return &sdk.CallToolResult{
 			Content: []sdk.Content{&sdk.TextContent{Text: text}},
