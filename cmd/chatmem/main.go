@@ -26,6 +26,12 @@ func main() {
 		newDoctorCmd(),
 		newNotionCmd(),
 		newImportCmd(),
+		newInstallCmd(),
+		newUninstallCmd(),
+		newStartCmd(),
+		newStopCmd(),
+		newRestartCmd(),
+		newStatusCmd(),
 	)
 
 	if err := root.Execute(); err != nil {

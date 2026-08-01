@@ -8,7 +8,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
 
@@ -46,21 +48,39 @@ func runMCP(ctx context.Context, port uint32) error {
 	runtimeDir := filepath.Join(cacheHome(), "pg-runtime")
 	log.Info("chatmem mcp starting", "dataDir", dataDir, "port", port)
 
-	pg := chatpg.New(chatpg.Config{
-		DataDir:    dataDir,
-		RuntimeDir: runtimeDir,
-		Port:       port,
-	})
-	if err := pg.Start(ctx); err != nil {
-		return fmt.Errorf("start postgres: %w", err)
+	// If another chatmem process already has PG up on this port (common when
+	// an MCP client restarts us in the middle of the previous instance's
+	// shutdown), attach to it instead of trying to start a second one. Two
+	// concurrent bootstraps on the same pg-runtime dir were racing and
+	// corrupting the extraction — the internal/pg lock fixes that path but
+	// attaching is still the friendlier UX (no cold-start wait).
+	var (
+		pool     *pgxpool.Pool
+		stopPG   func() error
+	)
+	if p, ok := tryAttachPostgres(ctx, port); ok {
+		pool = p
+		stopPG = func() error { pool.Close(); return nil }
+		log.Info("attached to already-running postgres", "port", port)
+	} else {
+		pg := chatpg.New(chatpg.Config{
+			DataDir:    dataDir,
+			RuntimeDir: runtimeDir,
+			Port:       port,
+		})
+		if err := pg.Start(ctx); err != nil {
+			return fmt.Errorf("start postgres: %w", err)
+		}
+		pool = pg.Pool()
+		stopPG = pg.Stop
 	}
 	defer func() {
-		if err := pg.Stop(); err != nil {
+		if err := stopPG(); err != nil {
 			log.Error("stop postgres", "err", err)
 		}
 	}()
 
-	st := store.New(pg.Pool())
+	st := store.New(pool)
 	if err := st.EnsureSchema(ctx); err != nil {
 		return fmt.Errorf("schema: %w", err)
 	}
@@ -107,4 +127,23 @@ func runMCP(ctx context.Context, port uint32) error {
 		Version:      version,
 	})
 	return server.Run(ctx, &sdk.StdioTransport{})
+}
+
+// tryAttachPostgres returns a pool if a chatmem-compatible Postgres is
+// already listening on 127.0.0.1:<port>. Returns ok=false if not. Never
+// blocks longer than ~2s so cold startup isn't delayed when there's
+// no existing server.
+func tryAttachPostgres(ctx context.Context, port uint32) (*pgxpool.Pool, bool) {
+	dsn := fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/postgres?sslmode=disable&connect_timeout=2", port)
+	attachCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(attachCtx, dsn)
+	if err != nil {
+		return nil, false
+	}
+	if err := pool.Ping(attachCtx); err != nil {
+		pool.Close()
+		return nil, false
+	}
+	return pool, true
 }

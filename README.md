@@ -53,7 +53,10 @@ Working today:
 |---------|---------|
 | `chatmem init` | Provision the local database, apply schema, print MCP client config. |
 | `chatmem mcp` | Self-contained stdio MCP server (starts + manages embedded Postgres). |
-| `chatmem daemon` | Long-lived Postgres process (foundation for the future daemon+shim architecture). |
+| `chatmem daemon` | Long-lived Postgres process. Normally not invoked directly — `chatmem install` wraps this in a launchd/systemd service so it starts at login and stays warm. |
+| `chatmem install` / `uninstall` | Install / remove the user-level background service (launchd on macOS, systemd --user on Linux) that runs `chatmem daemon`. Keeps embedded Postgres warm so MCP clients get instant startup instead of the 6-8s cold boot. |
+| `chatmem start` / `stop` / `restart` | Start / stop / restart the background service. |
+| `chatmem status` | Show whether the service is installed + whether PG is listening. |
 | `chatmem doctor` | Print a self-diagnostic report — HOME, EUID, data/cache paths, port availability, telemetry state, ingest reachability, Notion status. Run this first if anything's weird. |
 | `chatmem telemetry {enable,disable,status,dump}` | Manage anonymous telemetry; honors `CHATMEM_TELEMETRY=0`. |
 | `chatmem notion {connect,status,disconnect,list,resync,sample}` | Manage Notion integration for auto-synthesizing conversations into study/debug pages. See [Notion synthesis](#notion-synthesis-v020) below. |

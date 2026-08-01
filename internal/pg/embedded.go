@@ -3,15 +3,18 @@ package pg
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
+	"github.com/gofrs/flock"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -65,6 +68,14 @@ func New(cfg Config) *Embedded {
 }
 
 func (e *Embedded) Start(ctx context.Context) error {
+	// Bootstrap is racy when two chatmem processes launch simultaneously
+	// (common when an MCP client restarts the server). Serialize with a
+	// file lock on the runtime dir + drop a half-extracted runtime if we
+	// detect one. Only extraction is locked; the actual PG boot happens
+	// after the lock is released so second callers can attach.
+	if err := e.bootstrapUnderLock(ctx); err != nil {
+		return err
+	}
 	if err := e.pg.Start(); err != nil {
 		return fmt.Errorf("start postgres: %w", err)
 	}
@@ -89,6 +100,58 @@ func (e *Embedded) Stop() error {
 		e.pool = nil
 	}
 	return e.pg.Stop()
+}
+
+// bootstrapUnderLock serializes the extract-postgres-tarball step so two
+// concurrent chatmem processes (typical when an MCP client restarts the
+// server) don't race and leave a half-extracted pg-runtime dir. Also
+// detects a previously-crashed extraction (temp_*/ dirs sitting next to
+// pg-runtime, or pg-runtime missing bin/postgres) and cleans up so
+// embedded-postgres can re-extract cleanly.
+func (e *Embedded) bootstrapUnderLock(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(e.cfg.RuntimeDir), 0o755); err != nil {
+		return fmt.Errorf("mkdir cache parent: %w", err)
+	}
+	lockPath := e.cfg.RuntimeDir + ".lock"
+	lock := flock.New(lockPath)
+
+	// Bounded wait: MCP clients can spawn a new chatmem before the previous
+	// one finishes shutting down; give the previous bootstrap ~90s to finish
+	// its extraction (embedded-postgres tarball extract on cold cache is
+	// typically <30s).
+	lockCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	locked, err := lock.TryLockContext(lockCtx, 250*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("acquire pg bootstrap lock (%s): %w", lockPath, err)
+	}
+	if !locked {
+		return fmt.Errorf("another chatmem process is bootstrapping postgres (holding %s); retry in a moment", lockPath)
+	}
+	defer func() { _ = lock.Unlock() }()
+
+	// Clean up any leftover temp_*/ dirs from a previously-crashed extract.
+	// embedded-postgres creates temp_<rand>/ next to pg-runtime while it
+	// unpacks; a crash mid-extract leaves them stranded and a subsequent
+	// extraction can rename over their partials.
+	entries, _ := os.ReadDir(filepath.Dir(e.cfg.RuntimeDir))
+	for _, ent := range entries {
+		if ent.IsDir() && strings.HasPrefix(ent.Name(), "temp_") {
+			_ = os.RemoveAll(filepath.Join(filepath.Dir(e.cfg.RuntimeDir), ent.Name()))
+		}
+	}
+
+	// If pg-runtime exists but lacks bin/postgres, extraction was interrupted.
+	// Wipe it so embedded-postgres re-extracts from scratch.
+	pgBin := filepath.Join(e.cfg.RuntimeDir, "bin", "postgres")
+	if _, err := os.Stat(e.cfg.RuntimeDir); err == nil {
+		if _, err := os.Stat(pgBin); errors.Is(err, os.ErrNotExist) {
+			if err := os.RemoveAll(e.cfg.RuntimeDir); err != nil {
+				return fmt.Errorf("clean partial pg-runtime: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (e *Embedded) Pool() *pgxpool.Pool { return e.pool }
