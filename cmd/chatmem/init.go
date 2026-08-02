@@ -75,21 +75,32 @@ func runInit(ctx context.Context) error {
 	fmt.Printf("Data dir:    %s\n", dataDir)
 	fmt.Printf("Runtime dir: %s\n", runtimeDir)
 	fmt.Println()
-	fmt.Println("To register with Claude Code, add this to ~/.claude/mcp.json:")
+	fmt.Println("Register with your MCP client:")
 	fmt.Println()
-	fmt.Printf(`{
-  "mcpServers": {
-    "chatmem": {
-      "command": "%s",
-      "args": ["mcp"]
-    }
-  }
-}`, bin)
+	fmt.Printf("  Claude Code (terminal, 2.1.x+):\n")
+	fmt.Printf("    claude mcp add --scope user chatmem %s mcp\n", bin)
 	fmt.Println()
+	fmt.Println("  Claude Desktop app:")
+	fmt.Println("    Merge into ~/Library/Application Support/Claude/claude_desktop_config.json:")
+	fmt.Printf(`      {
+        "mcpServers": {
+          "chatmem": { "command": "%s", "args": ["mcp"] }
+        }
+      }
+`, bin)
+	fmt.Println("    Then fully quit + relaunch the app.")
 	fmt.Println()
-	fmt.Println("For Cursor, add the same block to ~/.cursor/mcp.json.")
-	fmt.Println("Restart the client and the chatmem tools (record_message, search_history,")
-	fmt.Println("get_conversation) will appear.")
+	fmt.Println("  Codex:")
+	fmt.Println("    Merge into ~/.codex/config.toml:")
+	fmt.Printf(`      [mcp_servers.chatmem]
+      command = "%s"
+      args = ["mcp"]
+      startup_timeout_sec = 60
+`, bin)
+	fmt.Println()
+	fmt.Println("Restart the client. Tools appear as: record_message, search_history,")
+	fmt.Println("get_conversation, get_extraction_prompt, record_facts,")
+	fmt.Println("get_synthesis_prompt, synthesize_to_notion, list_notion_pages.")
 	return nil
 }
 

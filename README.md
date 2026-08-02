@@ -96,7 +96,14 @@ chatmem init
 #    record_message, search_history, get_conversation from the 'chatmem' server.
 ```
 
-Example MCP client config (`init` prints this with your actual binary path):
+**Claude Code (terminal `claude`, 2.1.x+):**
+
+```bash
+claude mcp add --scope user chatmem /opt/homebrew/bin/chatmem mcp
+claude mcp list   # should show: chatmem ✓ Connected
+```
+
+**Claude Desktop app** — merge into `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -108,6 +115,19 @@ Example MCP client config (`init` prints this with your actual binary path):
   }
 }
 ```
+
+Fully quit + relaunch the app after editing.
+
+**Codex** — merge into `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.chatmem]
+command = "/opt/homebrew/bin/chatmem"
+args = ["mcp"]
+startup_timeout_sec = 60
+```
+
+**Cursor / Windsurf / other MCP clients** — same JSON block as Claude Desktop but in their MCP config file. Consult the client's docs for the path.
 
 ## MCP tools reference
 
