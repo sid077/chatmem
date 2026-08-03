@@ -43,6 +43,13 @@ func runDoctor() {
 	fmt.Printf("cache:    %s\n", cacheHome())
 	fmt.Println()
 
+	if bin, err := os.Executable(); err == nil {
+		if sig := codesignStatus(bin); sig != "" {
+			fmt.Printf("signing:  %s\n", sig)
+		}
+	}
+	fmt.Println()
+
 	fmt.Println("── checks ──")
 	check("not running as root", requireNonRoot)
 	check("HOME writable + owned by current user", preflight)

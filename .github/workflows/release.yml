@@ -1,10 +1,30 @@
 name: release
 
-# Triggered by pushing a v* tag. Runs goreleaser (which builds binaries,
-# tarballs, .rpm, .deb, uploads to the GitHub Release, and pushes the
-# Homebrew formula to sid077/homebrew-chatmem), then assembles a
-# zypper/dnf-compatible RPM repo tree and publishes it to the gh-pages
-# branch so users can `zypper ar https://sid077.github.io/chatmem/chatmem.repo`.
+# Triggered by pushing a v* tag. Runs goreleaser (builds binaries, tarballs,
+# .rpm, .deb, uploads to the GitHub Release, and pushes the Homebrew cask to
+# sid077/homebrew-chatmem), then optionally signs artifacts (RPM GPG signing
+# + macOS notarization, both gated on secrets), then assembles a zypper/dnf
+# repo tree and publishes it to the gh-pages branch.
+#
+# Secrets (all optional — features degrade gracefully when unset):
+#
+#   HOMEBREW_TAP_GITHUB_TOKEN — PAT that can push to sid077/homebrew-chatmem.
+#                              Required for the Homebrew cask update.
+#
+#   RPM signing (v0.3.2+):
+#     GPG_PRIVATE_KEY         — ASCII-armored GPG secret key. When set, RPMs
+#                              are rpm --addsign'd and gh-pages publishes
+#                              chatmem.gpg + a chatmem.repo with gpgcheck=1.
+#     GPG_PASSPHRASE          — passphrase for the above key.
+#
+#   macOS signing + notarization (v0.3.2+):
+#     MACOS_CERT_P12          — base64-encoded Developer ID Application .p12.
+#     MACOS_CERT_PWD          — password for the .p12.
+#     APP_STORE_CONNECT_KEY   — base64-encoded App Store Connect API key JSON
+#                              (with key_id, issuer_id, key_pem). rcodesign
+#                              accepts this as --api-key-path.
+#
+# See docs/release-signing-setup.md for step-by-step secret generation.
 on:
   push:
     tags: ['v*']
@@ -20,6 +40,12 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE:  ${{ secrets.GPG_PASSPHRASE }}
+      MACOS_CERT_P12:  ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PWD:  ${{ secrets.MACOS_CERT_PWD }}
+      APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +58,25 @@ jobs:
       - name: Install createrepo_c
         run: sudo apt-get update -qq && sudo apt-get install -qq -y createrepo-c
 
+      # ── Import GPG key (guarded on secret) ─────────────────────────────
+      - name: Import GPG key for RPM signing
+        if: env.GPG_PRIVATE_KEY != ''
+        run: |
+          set -euo pipefail
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --pinentry-mode loopback --import
+          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')
+          if [ -z "$KEY_ID" ]; then echo "no GPG key imported" >&2; exit 1; fi
+          echo "GPG_KEY_ID=$KEY_ID" >> $GITHUB_ENV
+          # Configure rpm to use this key by default.
+          cat > ~/.rpmmacros <<RPMMACROS
+          %_signature gpg
+          %_gpg_name $KEY_ID
+          %__gpg_sign_cmd %{__gpg} --pinentry-mode loopback --batch --passphrase-fd 3 -u "%{_gpg_name}" --detach-sign --output %{__signature_filename} %{__plaintext_filename}
+          RPMMACROS
+          # Export public key to a stable path for publication + rpm import.
+          gpg --armor --export "$KEY_ID" > /tmp/chatmem-repo.gpg
+          echo "RPM signing enabled with key $KEY_ID"
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
@@ -42,10 +87,78 @@ jobs:
           # HOMEBREW_TAP_GITHUB_TOKEN as a repo secret.
           GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
 
+      # ── Sign RPMs (guarded on GPG key) ─────────────────────────────────
+      - name: Sign RPMs with GPG key
+        if: env.GPG_KEY_ID != ''
+        run: |
+          set -euo pipefail
+          for rpm in dist/*.rpm; do
+            echo "signing $rpm"
+            # rpm --addsign needs the passphrase on fd 3 per the macro above.
+            printf "%s" "$GPG_PASSPHRASE" | rpm --addsign "$rpm" 3<&0 </dev/null
+            rpm -K "$rpm"
+          done
+          echo "signed $(ls dist/*.rpm | wc -l) RPMs"
+
+      # ── Install rcodesign + sign + notarize darwin binaries ────────────
+      - name: Install rcodesign for macOS signing
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          VERSION="0.29.0"
+          curl -sSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${VERSION}/apple-codesign-${VERSION}-x86_64-unknown-linux-musl.tar.gz" | tar -xz
+          sudo mv "apple-codesign-${VERSION}-x86_64-unknown-linux-musl/rcodesign" /usr/local/bin/
+          rcodesign --version
+
+      - name: Sign + notarize macOS binaries
+        if: env.MACOS_CERT_P12 != '' && env.APP_STORE_CONNECT_KEY != ''
+        run: |
+          set -euo pipefail
+          echo "$MACOS_CERT_P12"        | base64 -d > /tmp/cert.p12
+          echo "$APP_STORE_CONNECT_KEY" | base64 -d > /tmp/appstore.json
+          for tarball in dist/*darwin*.tar.gz; do
+            echo "signing + notarizing $tarball"
+            workdir=$(mktemp -d)
+            tar -xzf "$tarball" -C "$workdir"
+            rcodesign sign \
+              --p12-file /tmp/cert.p12 \
+              --p12-password "$MACOS_CERT_PWD" \
+              --code-signature-flags runtime \
+              "$workdir/chatmem"
+            rcodesign notary-submit \
+              --api-key-path /tmp/appstore.json \
+              --wait \
+              "$workdir/chatmem"
+            # Repack the tarball with the signed+notarized binary.
+            (cd "$workdir" && tar -czf "$tarball" .)
+          done
+          # Wipe secrets from disk.
+          shred -u /tmp/cert.p12 /tmp/appstore.json || rm -f /tmp/cert.p12 /tmp/appstore.json
+
+      - name: Regenerate checksums after signing
+        if: env.GPG_KEY_ID != '' || env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          cd dist
+          # Match goreleaser's default checksum format (sha256sum of every
+          # user-visible artifact, one per line).
+          sha256sum chatmem_*.tar.gz chatmem_*.deb chatmem-*.rpm > checksums.txt
+
+      - name: Upload signed artifacts to release (overwrite)
+        if: env.GPG_KEY_ID != '' || env.MACOS_CERT_P12 != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ github.ref_name }}" \
+            dist/chatmem_*.tar.gz \
+            dist/chatmem_*.deb \
+            dist/chatmem-*.rpm \
+            dist/checksums.txt \
+            --clobber --repo "${{ github.repository }}"
+
       - name: Assemble RPM repo tree
         run: |
-          # Run the createrepo step directly (skip the docker-in-docker path
-          # since createrepo_c is already installed on the runner).
           set -euo pipefail
           OUT=dist/rpm-repo
           BASE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}"
@@ -53,19 +166,40 @@ jobs:
           cp dist/*.x86_64.rpm  "$OUT/x86_64/"
           cp dist/*.aarch64.rpm "$OUT/aarch64/"
           for arch in x86_64 aarch64; do createrepo_c --quiet "$OUT/$arch"; done
+
+          # If we imported a GPG key, sign the repomd.xml files too so
+          # zypper's stricter mode is happy, and publish the public key
+          # alongside so 'zypper ar' can import it automatically.
+          if [ -n "${GPG_KEY_ID:-}" ] && [ -f /tmp/chatmem-repo.gpg ]; then
+            cp /tmp/chatmem-repo.gpg "$OUT/chatmem.gpg"
+            for arch in x86_64 aarch64; do
+              printf "%s" "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+                --passphrase-fd 0 --detach-sign --armor \
+                "$OUT/$arch/repodata/repomd.xml"
+            done
+            REPO_GPGCHECK=1
+            REPO_GPGKEY_LINE="gpgkey=$BASE_URL/chatmem.gpg"
+          else
+            REPO_GPGCHECK=0
+            REPO_GPGKEY_LINE=""
+          fi
+
           cat > "$OUT/chatmem.repo" <<REPO
           [chatmem]
           name=chatmem
           baseurl=$BASE_URL/\$basearch/
           enabled=1
           autorefresh=1
-          gpgcheck=0
+          gpgcheck=$REPO_GPGCHECK
+          $REPO_GPGKEY_LINE
           type=rpm-md
           REPO
+
           # Publish the MCP server-card so Smithery + the official MCP
           # registry can discover our tools without spawning the binary.
           mkdir -p "$OUT/.well-known/mcp"
           cp .well-known/mcp/server-card.json "$OUT/.well-known/mcp/server-card.json"
+
           # Minimal landing page so people who load the base URL in a browser
           # get a helpful pointer instead of a 404.
           cat > "$OUT/index.html" <<HTML

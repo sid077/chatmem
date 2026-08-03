@@ -258,6 +258,12 @@ func printServiceStatus() {
 	fmt.Printf("cache:    %s\n", cacheHome())
 	fmt.Println()
 
+	if bin, err := binPath(); err == nil {
+		if s := codesignStatus(bin); s != "" {
+			fmt.Printf("signing:  %s\n", s)
+		}
+	}
+
 	fmt.Println("── service ──")
 	unit := serviceUnitPath()
 	if unit == "" {
@@ -348,6 +354,19 @@ func installLaunchd() error {
 	if err := os.MkdirAll(filepath.Join(home, launchdPlistDir), 0o755); err != nil {
 		return err
 	}
+
+	// Ad-hoc codesign so launchd's Gatekeeper check on every daemon start
+	// doesn't prompt the user. This does NOT bypass the "downloaded from
+	// internet" quarantine — that's what `xattr -d com.apple.quarantine`
+	// (documented in the README) handles. Together, no more scary dialogs.
+	// Release binaries in v0.3.2+ SHOULD also be Developer-ID-signed +
+	// notarized in the release workflow; this local ad-hoc signing is the
+	// safety net for pre-notarization installs.
+	if err := adhocSign(bin); err != nil {
+		fmt.Printf("warning: could not ad-hoc sign %s (%v)\n", bin, err)
+		fmt.Println("         Gatekeeper may prompt on daemon starts. Try: sudo codesign --force --sign - " + bin)
+	}
+
 	body := fmt.Sprintf(launchdPlistTemplate, launchdLabel, bin, home, logDir, logDir)
 	path := filepath.Join(home, launchdPlistDir, launchdPlistFile)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
@@ -361,6 +380,55 @@ func installLaunchd() error {
 	}
 	fmt.Println("started via launchctl. Verify: chatmem status")
 	return nil
+}
+
+// adhocSign runs `codesign --force --sign -` on the chatmem binary. Ad-hoc
+// signatures establish a stable code identity that Gatekeeper accepts for
+// locally-installed binaries without a Developer ID. Real Developer-ID +
+// notarization removes the prompts for OTHER users too; this only helps
+// the user who ran `chatmem install`.
+func adhocSign(bin string) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	// Verify first — if already signed, skip.
+	if err := exec.Command("codesign", "--verify", "--strict", bin).Run(); err == nil {
+		return nil // already signed (ad-hoc or real)
+	}
+	out, err := exec.Command("codesign", "--force", "--sign", "-", bin).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("codesign: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("ad-hoc signed %s\n", bin)
+	return nil
+}
+
+// codesignStatus returns "ad-hoc signed" | "Developer ID signed" |
+// "not signed" | "check failed" for the chatmem binary. Used by doctor
+// and status. macOS-only; returns "" on other OSes.
+func codesignStatus(bin string) string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	if err := exec.Command("codesign", "--verify", "--strict", bin).Run(); err != nil {
+		return "not signed"
+	}
+	// Look at the signing authority to distinguish ad-hoc from real.
+	out, err := exec.Command("codesign", "-dv", "--verbose=2", bin).CombinedOutput()
+	if err != nil {
+		return "check failed"
+	}
+	s := string(out)
+	if strings.Contains(s, "Signature=adhoc") {
+		return "ad-hoc signed (locally trusted only)"
+	}
+	if strings.Contains(s, "Authority=Developer ID Application") {
+		return "Developer ID signed"
+	}
+	if strings.Contains(s, "Apple Notary Authority") || strings.Contains(s, "runtime version") {
+		return "Developer ID signed + notarized"
+	}
+	return "signed (unknown authority)"
 }
 
 func uninstallLaunchd() error {

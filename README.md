@@ -596,13 +596,19 @@ Tests use distinct hard-coded ports (`54334`, `54335`, `54336`) — run one test
 
 ## Troubleshooting
 
-**On macOS after `brew install --cask chatmem`: binary killed with `zsh: killed chatmem`** — Gatekeeper quarantined the unsigned cask binary. Strip the attribute:
+**On macOS: "Apple could not verify … may be malware" dialog** — the release binary isn't Apple-Developer-ID signed or notarized yet. Two-step workaround for now:
 
 ```bash
+# 1. Strip the "downloaded from internet" flag (needed once per install):
 xattr -d com.apple.quarantine "$(brew --prefix)/bin/chatmem"
+
+# 2. Ad-hoc-sign the binary so launchd doesn't re-prompt on every daemon start:
+codesign --force --sign - "$(brew --prefix)/bin/chatmem"
 ```
 
-The real fix is signing + notarizing the darwin binary with an Apple Developer ID (planned for v0.0.2).
+`chatmem install` runs step 2 automatically as of v0.3.2. Real fix (Developer ID + notarization) is wired into the release workflow; it activates for future releases once the `MACOS_CERT_P12` + `APP_STORE_CONNECT_KEY` secrets are added. See `docs/release-signing-setup.md`.
+
+**On Linux: "Package chatmem is not signed! Continue anyway?" warning from zypper/dnf** — the release RPMs aren't GPG-signed yet. Same story as macOS — plumbing lands in v0.3.2, activates when the `GPG_PRIVATE_KEY` secret is added. Until then it's safe to accept the warning (`--allow-unsigned-rpm`).
 
 **Anything weird? Run `chatmem doctor` first** — it prints HOME, EUID, effective data + cache paths, port availability, telemetry state, and ingest reachability, with a green/red check for each. Most install-time issues surface here in one screen.
 
