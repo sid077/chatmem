@@ -4,4 +4,5 @@ baseurl=https://sid077.github.io/chatmem/$basearch/
 enabled=1
 autorefresh=1
 gpgcheck=0
+
 type=rpm-md
