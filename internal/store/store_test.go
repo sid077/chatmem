@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,8 +31,20 @@ func TestStoreRoundTrip(t *testing.T) {
 	t.Cleanup(func() { _ = pg.Stop() })
 
 	s := store.New(pg.Pool())
-	if err := s.EnsureSchema(ctx); err != nil {
-		t.Fatalf("ensure schema: %v", err)
+	// Several chatmem processes routinely start against one Postgres at
+	// once; concurrent schema application on a fresh DB must not race
+	// (CREATE EXTENSION IF NOT EXISTS raised a unique violation).
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); errs[i] = s.EnsureSchema(ctx) }(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ensure schema #%d: %v", i, err)
+		}
 	}
 
 	first, err := s.RecordMessage(ctx, store.RecordMessageIn{

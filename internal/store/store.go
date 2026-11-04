@@ -23,14 +23,30 @@ func New(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+// schemaLockKey is the pg_advisory_xact_lock key that serializes
+// EnsureSchema across processes sharing one Postgres.
+const schemaLockKey = 0x63686174_6d656d // "chatmem"
+
+// EnsureSchema applies schema.sql. It runs in one transaction under an
+// advisory lock: several chatmem processes routinely start against the same
+// Postgres at once, and CREATE EXTENSION / CREATE TABLE ... IF NOT EXISTS
+// are not concurrency-safe — the loser fails with a unique violation.
 func (s *Store) EnsureSchema(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(schemaLockKey)); err != nil {
+		return fmt.Errorf("schema lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS vector"); err != nil {
 		return fmt.Errorf("create ext vector: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx, schemaSQL); err != nil {
+	if _, err := tx.Exec(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 type RecordMessageIn struct {

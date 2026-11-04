@@ -23,13 +23,13 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Print a self-diagnostic report of chatmem's install + runtime state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			runDoctor()
+			runDoctor(cmd.Context())
 			return nil
 		},
 	}
 }
 
-func runDoctor() {
+func runDoctor(ctx context.Context) {
 	fmt.Printf("chatmem %s   (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
 	if bin, err := os.Executable(); err == nil {
 		fmt.Printf("binary:   %s\n", bin)
@@ -59,9 +59,17 @@ func runDoctor() {
 	check("cache dir writable", func() error {
 		return probeMkdir(cacheHome())
 	})
-	check(fmt.Sprintf("default port %d is free", defaultPort), func() error {
-		return probePort(defaultPort)
-	})
+	// A busy port is healthy when chatmem's own Postgres is what holds it
+	// (another MCP client or the daemon is running); only flag it when
+	// something else does.
+	if pool, ok := tryAttachPostgres(ctx, defaultPort); ok {
+		pool.Close()
+		check(fmt.Sprintf("chatmem postgres running on port %d", defaultPort), func() error { return nil })
+	} else {
+		check(fmt.Sprintf("default port %d is free", defaultPort), func() error {
+			return probePort(defaultPort)
+		})
+	}
 	fmt.Println()
 
 	// Telemetry state
