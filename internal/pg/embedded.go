@@ -89,12 +89,16 @@ func (e *Embedded) Start(ctx context.Context) error {
 	if err := e.startUnderLock(ctx); err != nil {
 		return err
 	}
+	// The server is running from here on; any failure must stop it, or the
+	// caller is left with an orphaned postgres it doesn't know it owns.
 	pool, err := pgxpool.New(ctx, e.dsn)
 	if err != nil {
+		_ = e.pg.Stop()
 		return fmt.Errorf("connect pool: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
+		_ = e.pg.Stop()
 		return fmt.Errorf("ping: %w", err)
 	}
 	e.pool = pool

@@ -56,35 +56,31 @@ func runMCP(ctx context.Context, port uint32) error {
 	// concurrent bootstraps on the same pg-runtime dir were racing and
 	// corrupting the extraction — the internal/pg lock fixes that path but
 	// attaching is still the friendlier UX (no cold-start wait).
-	var (
-		pool     *pgxpool.Pool
-		stopPG   func() error
-	)
+	pgCfg := chatpg.Config{
+		DataDir:    dataDir,
+		RuntimeDir: runtimeDir,
+		Port:       port,
+	}
+	var sup *pgSupervisor
 	if p, ok := tryAttachPostgres(ctx, port); ok {
-		pool = p
-		stopPG = func() error { pool.Close(); return nil }
+		sup = newPGSupervisor(pgCfg, p, nil, log)
 		log.Info("attached to already-running postgres", "port", port)
 	} else {
-		pg := chatpg.New(chatpg.Config{
-			DataDir:    dataDir,
-			RuntimeDir: runtimeDir,
-			Port:       port,
-		})
+		pg := chatpg.New(pgCfg)
 		if err := pg.Start(ctx); err == nil {
-			pool = pg.Pool()
-			stopPG = pg.Stop
+			sup = newPGSupervisor(pgCfg, pg.Pool(), pg, log)
 		} else if p, ok := attachAfterLostRace(ctx, port, err); ok {
 			// Another chatmem won the bootstrap lock and booted PG while we
 			// waited; use theirs.
-			pool = p
-			stopPG = func() error { pool.Close(); return nil }
+			sup = newPGSupervisor(pgCfg, p, nil, log)
 			log.Info("attached to postgres started concurrently", "port", port)
 		} else {
 			return fmt.Errorf("start postgres: %w", err)
 		}
 	}
+	pool := sup.pool
 	defer func() {
-		if err := stopPG(); err != nil {
+		if err := sup.stop(); err != nil {
 			log.Error("stop postgres", "err", err)
 		}
 	}()
@@ -116,6 +112,7 @@ func runMCP(ctx context.Context, port uint32) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	tclient.Start(ctx) // final flush fires on ctx.Done()
+	go sup.watch(ctx, time.Second)
 
 	// Drain any queued notion writes on startup so we don't sit on failures.
 	if notionWriter != nil {
