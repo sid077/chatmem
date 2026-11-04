@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,3 +113,75 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+
+// TestLargeMessageAndSchemaMigration covers the stored-tsvector search
+// column: a database created with the pre-v0.3.3 expression index must
+// migrate in place, and messages far over Postgres's 1MB tsvector limit
+// must still record (they used to fail with SQLSTATE 54000).
+func TestLargeMessageAndSchemaMigration(t *testing.T) {
+	tmp := t.TempDir()
+	pg := chatpg.New(chatpg.Config{
+		DataDir:    filepath.Join(tmp, "data"),
+		RuntimeDir: filepath.Join(tmp, "runtime"),
+		Port:       54338,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := pg.Start(ctx); err != nil {
+		t.Fatalf("start pg: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.Stop() })
+	pool := pg.Pool()
+
+	// Simulate an existing install: old schema shape plus a stored row.
+	if _, err := pool.Exec(ctx, `
+		CREATE EXTENSION IF NOT EXISTS vector;
+		CREATE TABLE conversations (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), client_id TEXT NOT NULL,
+			model TEXT NOT NULL, provider TEXT NOT NULL, title TEXT, started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+			ended_at TIMESTAMPTZ, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, seq BIGSERIAL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+		CREATE TABLE messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, role TEXT NOT NULL,
+			content TEXT NOT NULL, tool_calls JSONB, token_count INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now(), seq BIGSERIAL);
+		CREATE TABLE chunks (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+			conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			chunk_index INTEGER NOT NULL, content TEXT NOT NULL, embedding vector(384) NOT NULL,
+			token_count INTEGER NOT NULL DEFAULT 0, seq BIGSERIAL);
+		CREATE INDEX chunks_tsv_idx ON chunks USING gin (to_tsvector('english', content));
+		WITH c AS (INSERT INTO conversations (client_id, model, provider) VALUES ('c','m','p') RETURNING id),
+		     m AS (INSERT INTO messages (conversation_id, role, content) SELECT id, 'user', 'legacy zeppelin row' FROM c RETURNING id, conversation_id)
+		INSERT INTO chunks (message_id, conversation_id, chunk_index, content, embedding)
+		SELECT id, conversation_id, 0, 'legacy zeppelin row', array_fill(0::real, ARRAY[384])::vector FROM m;`); err != nil {
+		t.Fatalf("seed old schema: %v", err)
+	}
+
+	s := store.New(pool)
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("schema must be re-appliable: %v", err)
+	}
+	hits, err := s.SearchHistory(ctx, store.SearchHistoryIn{Query: "zeppelin"})
+	if err != nil || len(hits.Hits) != 1 {
+		t.Fatalf("pre-existing row not searchable after migration: hits=%d err=%v", len(hits.Hits), err)
+	}
+
+	// ~3.5MB of distinct tokens, with a findable word at the start.
+	var b strings.Builder
+	b.WriteString("quokka ")
+	for i := 0; b.Len() < 3_500_000; i++ {
+		fmt.Fprintf(&b, "tok%dx%d ", i, i*7)
+	}
+	if _, err := s.RecordMessage(ctx, store.RecordMessageIn{
+		Role: "tool", Content: b.String(), Model: "m", Provider: "p", ClientID: "c",
+	}); err != nil {
+		t.Fatalf("record 3.5MB message: %v", err)
+	}
+	hits, err = s.SearchHistory(ctx, store.SearchHistoryIn{Query: "quokka"})
+	if err != nil || len(hits.Hits) != 1 {
+		t.Fatalf("large message not searchable: hits=%d err=%v", len(hits.Hits), err)
+	}
+}

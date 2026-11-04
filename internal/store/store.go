@@ -148,6 +148,27 @@ func (s *Store) RecordSynthesis(ctx context.Context, in RecordSynthesisIn) error
 	return nil
 }
 
+// RecordPublishedPage stores a page's identity without resetting
+// messages_since_last_synth. Used when a page was written outside a normal
+// synthesize call (a drained pending retry), or was created but left
+// incomplete (SummaryHash "") — either way the next synthesis must update
+// this page instead of creating a new one.
+func (s *Store) RecordPublishedPage(ctx context.Context, in RecordSynthesisIn) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE conversations
+		   SET notion_page_id = $2,
+		       notion_page_url = $3,
+		       notion_session_type = $4,
+		       notion_summary_hash = $5,
+		       notion_synthesized_at = now()
+		 WHERE id = $1`,
+		in.ConversationID, in.PageID, in.PageURL, in.SessionType, in.SummaryHash)
+	if err != nil {
+		return fmt.Errorf("record published page: %w", err)
+	}
+	return nil
+}
+
 // NotionPage is a row in the local index of published pages.
 type NotionPage struct {
 	ConversationID uuid.UUID
@@ -579,7 +600,7 @@ func (s *Store) SearchHistory(ctx context.Context, in SearchHistoryIn) (SearchHi
 	}
 
 	args := []any{in.Query}
-	where := []string{"to_tsvector('english', ch.content) @@ plainto_tsquery('english', $1)"}
+	where := []string{"ch.tsv @@ plainto_tsquery('english', $1)"}
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
@@ -600,17 +621,25 @@ func (s *Store) SearchHistory(ctx context.Context, in SearchHistoryIn) (SearchHi
 		where = append(where, "ch.conversation_id = ANY("+next(in.ConversationIDs)+")")
 	}
 
-	// Fetch a superset — token-budget packing may trim.
+	// Fetch a superset — token-budget packing may trim. Rank on the stored
+	// tsvector and carry only ids through the sort; chunk content (often
+	// TOASTed and large) is read for the winning rows only.
 	fetch := in.TopK * 3
 	sql := fmt.Sprintf(`
-		SELECT ch.message_id, ch.conversation_id, m.role, ch.content, ch.token_count, m.created_at,
-		       ts_rank_cd(to_tsvector('english', ch.content), plainto_tsquery('english', $1)) AS score
-		FROM chunks ch
-		JOIN messages m ON m.id = ch.message_id
-		JOIN conversations c ON c.id = ch.conversation_id
-		WHERE %s
-		ORDER BY score DESC, m.created_at DESC
-		LIMIT %d`, strings.Join(where, " AND "), fetch)
+		WITH ranked AS (
+			SELECT ch.id, m.role, m.created_at,
+			       ts_rank_cd(ch.tsv, plainto_tsquery('english', $1)) AS score
+			FROM chunks ch
+			JOIN messages m ON m.id = ch.message_id
+			JOIN conversations c ON c.id = ch.conversation_id
+			WHERE %s
+			ORDER BY score DESC, m.created_at DESC
+			LIMIT %d
+		)
+		SELECT ch.message_id, ch.conversation_id, r.role, ch.content, ch.token_count, r.created_at, r.score
+		FROM ranked r
+		JOIN chunks ch ON ch.id = r.id
+		ORDER BY r.score DESC, r.created_at DESC`, strings.Join(where, " AND "), fetch)
 
 	rows, err := s.pool.Query(ctx, sql, args...)
 	if err != nil {

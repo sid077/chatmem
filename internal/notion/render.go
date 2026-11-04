@@ -82,8 +82,13 @@ func Render(s Summary, meta RenderMeta, tx Transcript) []Block {
 			len(tx.Turns), meta.ConversationID)))
 		for _, t := range tx.Turns {
 			summary := fmt.Sprintf("%s @ %s", t.Role, t.CreatedAt.Format("2006-01-02 15:04:05"))
-			body := paragraphsFromText(t.Content)
-			b = append(b, Toggle(summary, body))
+			content := t.Content
+			if len(content) > maxTranscriptTurnBytes {
+				content = truncateBytes(content, maxTranscriptTurnBytes) + fmt.Sprintf(
+					"\n\n[truncated: %d of %d bytes shown — full text is message %s in chatmem conversation %s]",
+					maxTranscriptTurnBytes, len(t.Content), t.MessageID, meta.ConversationID)
+			}
+			b = append(b, Toggle(summary, transcriptParagraphs(content, maxChildrenPerReq)))
 		}
 	}
 
@@ -284,18 +289,53 @@ func renderDebug(s Summary) []Block {
 // paragraphsFromText splits markdown-flavored body text into one paragraph
 // per double-newline block. Nothing fancy — Notion doesn't render markdown
 // natively so we skip inline styling and just preserve paragraph breaks.
+// Paragraphs longer than one block can hold are split across blocks.
 func paragraphsFromText(s string) []Block {
+	parts := paragraphTexts(s)
+	out := make([]Block, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, ParaText(p))
+	}
+	return out
+}
+
+func paragraphTexts(s string) []string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
 	}
-	parts := strings.Split(s, "\n\n")
-	out := make([]Block, 0, len(parts))
-	for _, p := range parts {
+	var out []string
+	for _, p := range strings.Split(s, "\n\n") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
+		out = append(out, splitUTF16(p, maxParagraphUnits)...)
+	}
+	return out
+}
+
+// transcriptParagraphs renders one transcript turn as at most max
+// paragraph blocks, so its toggle stays under Notion's per-request child
+// limit. Adjacent paragraphs are merged (keeping their "\n\n" breaks)
+// when there are too many. Callers cap the text at maxTranscriptTurnBytes,
+// so a merged paragraph always fits in one block.
+func transcriptParagraphs(s string, max int) []Block {
+	parts := paragraphTexts(s)
+	if len(parts) > max {
+		per := (len(parts) + max - 1) / max
+		merged := make([]string, 0, max)
+		for i := 0; i < len(parts); i += per {
+			end := i + per
+			if end > len(parts) {
+				end = len(parts)
+			}
+			merged = append(merged, strings.Join(parts[i:end], "\n\n"))
+		}
+		parts = merged
+	}
+	out := make([]Block, 0, len(parts))
+	for _, p := range parts {
 		out = append(out, ParaText(p))
 	}
 	return out

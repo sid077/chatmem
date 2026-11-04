@@ -1,12 +1,14 @@
 package pg
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +45,12 @@ type Embedded struct {
 	dsn  string
 }
 
+// pgVersion is the Postgres release we run. It is also written to
+// <RuntimeDir>/.chatmem-pg-version so a binary upgrade re-extracts.
+const pgVersion = embeddedpostgres.V18
+
+const versionStamp = ".chatmem-pg-version"
+
 func New(cfg Config) *Embedded {
 	if cfg.LogWriter == nil {
 		cfg.LogWriter = os.Stderr
@@ -52,9 +60,15 @@ func New(cfg Config) *Embedded {
 		// lives under one predictable root.
 		cfg.CacheDir = filepath.Join(filepath.Dir(cfg.RuntimeDir), "binary-cache")
 	}
+	// embedded-postgres RemoveAll()s RuntimePath on every Start, then
+	// extracts into BinariesPath only when bin/pg_ctl is missing. Pointing
+	// RuntimePath at a throwaway scratch dir and BinariesPath at RuntimeDir
+	// means binaries are extracted once and never deleted from under a
+	// running server.
 	pg := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
-		Version(embeddedpostgres.V18).
-		RuntimePath(cfg.RuntimeDir).
+		Version(pgVersion).
+		RuntimePath(cfg.RuntimeDir + ".scratch").
+		BinariesPath(cfg.RuntimeDir).
 		DataPath(cfg.DataDir).
 		CachePath(cfg.CacheDir).
 		Port(cfg.Port).
@@ -69,18 +83,11 @@ func New(cfg Config) *Embedded {
 
 func (e *Embedded) Start(ctx context.Context) error {
 	// Bootstrap is racy when two chatmem processes launch simultaneously
-	// (common when an MCP client restarts the server). Serialize with a
-	// file lock on the runtime dir + drop a half-extracted runtime if we
-	// detect one. Only extraction is locked; the actual PG boot happens
-	// after the lock is released so second callers can attach.
-	if err := e.bootstrapUnderLock(ctx); err != nil {
+	// (common when an MCP client restarts the server). The lock must cover
+	// e.pg.Start() itself: that is where embedded-postgres extracts the
+	// binaries, so releasing the lock before it protects nothing.
+	if err := e.startUnderLock(ctx); err != nil {
 		return err
-	}
-	if err := e.pg.Start(); err != nil {
-		return fmt.Errorf("start postgres: %w", err)
-	}
-	if err := e.installPgvector(); err != nil {
-		return fmt.Errorf("install pgvector: %w", err)
 	}
 	pool, err := pgxpool.New(ctx, e.dsn)
 	if err != nil {
@@ -102,13 +109,13 @@ func (e *Embedded) Stop() error {
 	return e.pg.Stop()
 }
 
-// bootstrapUnderLock serializes the extract-postgres-tarball step so two
-// concurrent chatmem processes (typical when an MCP client restarts the
-// server) don't race and leave a half-extracted pg-runtime dir. Also
-// detects a previously-crashed extraction (temp_*/ dirs sitting next to
-// pg-runtime, or pg-runtime missing bin/postgres) and cleans up so
-// embedded-postgres can re-extract cleanly.
-func (e *Embedded) bootstrapUnderLock(ctx context.Context) error {
+// startUnderLock serializes extraction + pgvector install + server boot so
+// two concurrent chatmem processes (typical when an MCP client restarts
+// the server) don't race on the shared pg-runtime dir. Also detects a
+// previously-crashed extraction (temp_*/ dirs sitting next to pg-runtime,
+// pg-runtime missing bin/postgres, or a stale version stamp) and cleans up
+// so embedded-postgres can re-extract cleanly.
+func (e *Embedded) startUnderLock(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(e.cfg.RuntimeDir), 0o755); err != nil {
 		return fmt.Errorf("mkdir cache parent: %w", err)
 	}
@@ -141,15 +148,35 @@ func (e *Embedded) bootstrapUnderLock(ctx context.Context) error {
 		}
 	}
 
-	// If pg-runtime exists but lacks bin/postgres, extraction was interrupted.
-	// Wipe it so embedded-postgres re-extracts from scratch.
+	// If pg-runtime exists but lacks bin/postgres, extraction was interrupted;
+	// if its version stamp doesn't match, it's from an older chatmem. Either
+	// way wipe it so embedded-postgres re-extracts from scratch. Never wipe
+	// while a server we can see is using it (its port is in use).
+	if err := portFree(e.cfg.Port); err != nil {
+		return err
+	}
 	pgBin := filepath.Join(e.cfg.RuntimeDir, "bin", "postgres")
+	stamp := filepath.Join(e.cfg.RuntimeDir, versionStamp)
 	if _, err := os.Stat(e.cfg.RuntimeDir); err == nil {
-		if _, err := os.Stat(pgBin); errors.Is(err, os.ErrNotExist) {
+		_, binErr := os.Stat(pgBin)
+		got, _ := os.ReadFile(stamp)
+		if errors.Is(binErr, os.ErrNotExist) || strings.TrimSpace(string(got)) != string(pgVersion) {
 			if err := os.RemoveAll(e.cfg.RuntimeDir); err != nil {
-				return fmt.Errorf("clean partial pg-runtime: %w", err)
+				return fmt.Errorf("clean stale pg-runtime: %w", err)
 			}
 		}
+	}
+
+	if err := e.pg.Start(); err != nil {
+		return fmt.Errorf("start postgres: %w", err)
+	}
+	if err := os.WriteFile(stamp, []byte(pgVersion), 0o644); err != nil {
+		_ = e.pg.Stop()
+		return fmt.Errorf("write pg version stamp: %w", err)
+	}
+	if err := e.installPgvector(); err != nil {
+		_ = e.pg.Stop()
+		return fmt.Errorf("install pgvector: %w", err)
 	}
 	return nil
 }
@@ -197,13 +224,36 @@ func (e *Embedded) installPgvector() error {
 	return nil
 }
 
+// ErrPortInUse is returned by Start when something already listens on the
+// configured port. Callers can treat it as "attach instead".
+var ErrPortInUse = errors.New("postgres port already in use")
+
+func portFree(port uint32) error {
+	l, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		return fmt.Errorf("%w: %d", ErrPortInUse, port)
+	}
+	return l.Close()
+}
+
+// writeEmbedFile installs an embedded asset. Identical files are left
+// alone, and changed ones are swapped in via rename: truncating a shared
+// library in place while a running postgres has it mapped can crash that
+// server (on macOS, the kernel kills it for an invalid code signature).
 func writeEmbedFile(embedPath, dst string) error {
 	data, err := assetsFS.ReadFile(embedPath)
 	if err != nil {
 		return fmt.Errorf("read embed %s: %w", embedPath, err)
 	}
+	if cur, err := os.ReadFile(dst); err == nil && bytes.Equal(cur, data) {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	tmp := dst + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }

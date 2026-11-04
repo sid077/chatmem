@@ -90,6 +90,64 @@ type mockNotion struct {
 	pageURL  map[string]string
 	nextID   int
 	requests []string
+	// failAppends makes the next N append-children calls return 500.
+	failAppends int
+	// limitErrs collects request-limit violations (each also got a 400).
+	limitErrs []string
+}
+
+// checkRequestLimits mirrors the Notion API's documented request limits
+// so tests fail the same way the real API would.
+func checkRequestLimits(raw []byte, children []any) string {
+	if len(raw) > 500_000 {
+		return "payload over 500KB"
+	}
+	if len(children) > 100 {
+		return "more than 100 children"
+	}
+	total := 0
+	var walk func(v any, depth int) string
+	walk = func(v any, depth int) string {
+		switch x := v.(type) {
+		case map[string]any:
+			if rt, ok := x["rich_text"].([]any); ok && len(rt) > 100 {
+				return "rich_text array over 100"
+			}
+			if txt, ok := x["text"].(map[string]any); ok {
+				if c, _ := txt["content"].(string); len([]rune(c)) > 2000 {
+					return "text.content over 2000"
+				}
+			}
+			if kids, ok := x["children"].([]any); ok {
+				if len(kids) > 100 {
+					return "nested children over 100"
+				}
+				total += len(kids)
+			}
+			for _, vv := range x {
+				if msg := walk(vv, depth+1); msg != "" {
+					return msg
+				}
+			}
+		case []any:
+			for _, vv := range x {
+				if msg := walk(vv, depth); msg != "" {
+					return msg
+				}
+			}
+		}
+		return ""
+	}
+	total += len(children)
+	for _, c := range children {
+		if msg := walk(c, 0); msg != "" {
+			return msg
+		}
+	}
+	if total > 1000 {
+		return "more than 1000 blocks"
+	}
+	return ""
 }
 
 func newMock() *mockNotion {
@@ -130,6 +188,12 @@ func (m *mockNotion) handler() http.Handler {
 		case r.Method == "POST" && r.URL.Path == "/v1/pages":
 			var in map[string]any
 			_ = json.Unmarshal(body, &in)
+			kids, _ := in["children"].([]any)
+			if msg := checkRequestLimits(body, kids); msg != "" {
+				m.limitErrs = append(m.limitErrs, msg)
+				http.Error(w, msg, 400)
+				return
+			}
 			id := m.alloc()
 			url := "https://www.notion.so/" + strings.ReplaceAll(id, "-", "")
 			m.pageURL[id] = url
@@ -141,8 +205,19 @@ func (m *mockNotion) handler() http.Handler {
 			json.NewEncoder(w).Encode(map[string]any{"id": id, "url": url})
 		case r.Method == "PATCH" && strings.HasPrefix(r.URL.Path, "/v1/blocks/") && strings.HasSuffix(r.URL.Path, "/children"):
 			pageID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/blocks/"), "/children")
+			if m.failAppends > 0 {
+				m.failAppends--
+				http.Error(w, "boom", 500)
+				return
+			}
 			var in map[string]any
 			_ = json.Unmarshal(body, &in)
+			kids, _ := in["children"].([]any)
+			if msg := checkRequestLimits(body, kids); msg != "" {
+				m.limitErrs = append(m.limitErrs, msg)
+				http.Error(w, msg, 400)
+				return
+			}
 			if kids, ok := in["children"].([]any); ok {
 				for _, k := range kids {
 					m.pages[pageID] = append(m.pages[pageID], toBlock(k))

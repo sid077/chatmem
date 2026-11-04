@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
@@ -68,11 +70,18 @@ func runMCP(ctx context.Context, port uint32) error {
 			RuntimeDir: runtimeDir,
 			Port:       port,
 		})
-		if err := pg.Start(ctx); err != nil {
+		if err := pg.Start(ctx); err == nil {
+			pool = pg.Pool()
+			stopPG = pg.Stop
+		} else if p, ok := attachAfterLostRace(ctx, port, err); ok {
+			// Another chatmem won the bootstrap lock and booted PG while we
+			// waited; use theirs.
+			pool = p
+			stopPG = func() error { pool.Close(); return nil }
+			log.Info("attached to postgres started concurrently", "port", port)
+		} else {
 			return fmt.Errorf("start postgres: %w", err)
 		}
-		pool = pg.Pool()
-		stopPG = pg.Stop
 	}
 	defer func() {
 		if err := stopPG(); err != nil {
@@ -98,6 +107,7 @@ func runMCP(ctx context.Context, port uint32) error {
 		return fmt.Errorf("load notion config: %w", err)
 	}
 	if notionWriter != nil {
+		notionWriter.OnPublish(publishHook(st))
 		log.Info("notion", "enabled", true, "parent", notionWriter.Config().ParentPageID)
 	} else {
 		log.Info("notion", "enabled", false, "hint", "run `chatmem notion connect <token> --parent <page-id>` to enable")
@@ -146,4 +156,35 @@ func tryAttachPostgres(ctx context.Context, port uint32) (*pgxpool.Pool, bool) {
 		return nil, false
 	}
 	return pool, true
+}
+
+// publishHook records pages written by a drained pending retry, so the DB
+// knows the page id and the next synthesis updates it instead of creating
+// a duplicate.
+func publishHook(st *store.Store) notion.PublishHook {
+	return func(ctx context.Context, conversationID string, sessionType notion.SessionType, out notion.SynthesizeOut) error {
+		id, err := uuid.Parse(conversationID)
+		if err != nil {
+			return fmt.Errorf("pending write has invalid conversation id %q: %w", conversationID, err)
+		}
+		if out.PageID == "" || out.Skipped {
+			return nil
+		}
+		return st.RecordPublishedPage(ctx, store.RecordSynthesisIn{
+			ConversationID: id,
+			PageID:         out.PageID,
+			PageURL:        out.URL,
+			SessionType:    string(sessionType),
+			SummaryHash:    out.SummaryHash,
+		})
+	}
+}
+
+// attachAfterLostRace retries the attach when Start failed only because
+// the port was taken in the meantime.
+func attachAfterLostRace(ctx context.Context, port uint32, startErr error) (*pgxpool.Pool, bool) {
+	if !errors.Is(startErr, chatpg.ErrPortInUse) {
+		return nil, false
+	}
+	return tryAttachPostgres(ctx, port)
 }
