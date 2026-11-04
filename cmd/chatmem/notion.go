@@ -268,6 +268,12 @@ func notionResyncCmd() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
 			defer cancel()
+			st, cleanup, err := openStore(ctx)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			w.OnPublish(publishHook(st))
 			drained, still, err := w.DrainPending(ctx)
 			if err != nil {
 				return err
@@ -334,6 +340,14 @@ func openStore(ctx context.Context) (*store.Store, func(), error) {
 		Port:       defaultPort,
 	})
 	if err := pg.Start(ctx); err != nil {
+		if pool, ok := attachAfterLostRace(ctx, defaultPort, err); ok {
+			s := store.New(pool)
+			if err := s.EnsureSchema(ctx); err != nil {
+				pool.Close()
+				return nil, nil, err
+			}
+			return s, func() { pool.Close() }, nil
+		}
 		return nil, nil, fmt.Errorf("start postgres: %w", err)
 	}
 	s := store.New(pg.Pool())

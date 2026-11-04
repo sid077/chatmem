@@ -154,7 +154,7 @@ Returns:
 
 ### `search_history`
 
-Search stored chat history. **MVP uses Postgres full-text ranking** (`to_tsvector` + `plainto_tsquery`); semantic re-ranking via ONNX embeddings is the next milestone. Returns one hit per conversation (MMR-lite), packed to `token_budget`.
+Search stored chat history. **MVP uses Postgres full-text ranking** (`to_tsvector` + `plainto_tsquery`); semantic re-ranking via ONNX embeddings is the next milestone. Returns one hit per conversation (MMR-lite), packed to `token_budget`. The first 100,000 characters of each message are searchable; longer messages are stored in full but matched only on that prefix.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -307,7 +307,9 @@ chatmem notion coverage <conversation_id>
 
 ### Reliability
 
-Failed Notion writes are persisted to `~/.local/share/chatmem/notion-pending/` and retried automatically on the next `chatmem mcp` start, or manually with `chatmem notion resync`.
+Failed Notion writes are persisted to `~/.local/share/chatmem/notion-pending/<conversation-id>.json` (owner-only, since it holds the transcript) and retried automatically on the next `chatmem mcp` start, or manually with `chatmem notion resync`. Only the newest failed write per conversation is kept, and any later successful synthesis discards it. If a page was created before the failure, the retry updates that page; it never creates a second one.
+
+Long content is split to fit Notion's API limits (2000 characters per text run, 100 blocks per request). Each transcript turn on the page shows at most 100 KB; longer messages end with a note pointing at the full text in chatmem.
 
 ### Disconnect
 
@@ -481,7 +483,7 @@ LLM client (Claude Code, Cursor, aider, custom)
 - **Language**: Go 1.26, single static binary (CGO off).
 - **Storage**: `fergusstrange/embedded-postgres` v1.34 driving Postgres 18.3 in a per-user data dir. Cold start ~600 ms on M-series (~7 s on the very first run because of `initdb`).
 - **Vector column**: `vector(384)` on the `chunks` table with an HNSW cosine index (`m=16, ef_construction=64`), primed for semantic search. Values are zero-vectors until the ONNX embedder lands.
-- **Search (MVP)**: Postgres full-text — `to_tsvector('english', content)` + `plainto_tsquery`, GIN index (`chunks_tsv_idx`). Ranked with `ts_rank_cd`.
+- **Search (MVP)**: Postgres full-text — stored generated column `chunks.tsv = to_tsvector('english', left(content, 100000))` + `plainto_tsquery`, GIN index (`chunks_tsv_col_idx`). Ranked with `ts_rank_cd`. Upgrading from ≤ v0.3.2 rewrites the `chunks` table once on first start to add the column.
 - **MCP**: official [`modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk) v1.6.1. Stdio transport.
 - **CLI**: `spf13/cobra` v1.10.
 
@@ -581,7 +583,7 @@ go test ./internal/mcp -count=1 -v
 go test ./cmd/chatmem -run TestBinaryStdioMCP -count=1 -v
 ```
 
-Tests use distinct hard-coded ports (`54334`, `54335`, `54336`) — run one test package at a time if you have a real chatmem daemon running on `54329`.
+Tests use distinct hard-coded ports (`54334`–`54338`, `54340`–`54343`) — run one test package at a time if you have a real chatmem daemon running on `54329`.
 
 ## Development workflow
 

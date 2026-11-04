@@ -70,33 +70,33 @@ func RTLink(content, url string) map[string]any {
 
 func H1(text string) Block {
 	return Block{"object": "block", "type": "heading_1",
-		"heading_1": map[string]any{"rich_text": []any{RT(text)}}}
+		"heading_1": map[string]any{"rich_text": splitRuns([]any{RT(text)})}}
 }
 func H2(text string) Block {
 	return Block{"object": "block", "type": "heading_2",
-		"heading_2": map[string]any{"rich_text": []any{RT(text)}}}
+		"heading_2": map[string]any{"rich_text": splitRuns([]any{RT(text)})}}
 }
 func H3(text string) Block {
 	return Block{"object": "block", "type": "heading_3",
-		"heading_3": map[string]any{"rich_text": []any{RT(text)}}}
+		"heading_3": map[string]any{"rich_text": splitRuns([]any{RT(text)})}}
 }
 
 // Para writes a paragraph with the given rich-text runs.
 func Para(runs ...any) Block {
 	return Block{"object": "block", "type": "paragraph",
-		"paragraph": map[string]any{"rich_text": runs}}
+		"paragraph": map[string]any{"rich_text": splitRuns(runs)}}
 }
 func ParaText(text string) Block { return Para(RT(text)) }
 
 func Bullet(runs ...any) Block {
 	return Block{"object": "block", "type": "bulleted_list_item",
-		"bulleted_list_item": map[string]any{"rich_text": runs}}
+		"bulleted_list_item": map[string]any{"rich_text": splitRuns(runs)}}
 }
 func BulletText(text string) Block { return Bullet(RT(text)) }
 
 func Numbered(runs ...any) Block {
 	return Block{"object": "block", "type": "numbered_list_item",
-		"numbered_list_item": map[string]any{"rich_text": runs}}
+		"numbered_list_item": map[string]any{"rich_text": splitRuns(runs)}}
 }
 func NumberedText(text string) Block { return Numbered(RT(text)) }
 
@@ -106,7 +106,7 @@ func NumberedText(text string) Block { return Numbered(RT(text)) }
 func Callout(emoji, text, color string) Block {
 	return Block{"object": "block", "type": "callout",
 		"callout": map[string]any{
-			"rich_text": []any{RT(text)},
+			"rich_text": splitRuns([]any{RT(text)}),
 			"icon":      map[string]any{"type": "emoji", "emoji": emoji},
 			"color":     color,
 		}}
@@ -116,7 +116,7 @@ func Callout(emoji, text, color string) Block {
 func CalloutRich(emoji string, runs []any, color string) Block {
 	return Block{"object": "block", "type": "callout",
 		"callout": map[string]any{
-			"rich_text": runs,
+			"rich_text": splitRuns(runs),
 			"icon":      map[string]any{"type": "emoji", "emoji": emoji},
 			"color":     color,
 		}}
@@ -128,7 +128,7 @@ func Code(language, content string) Block {
 	return Block{"object": "block", "type": "code",
 		"code": map[string]any{
 			"language":  language,
-			"rich_text": []any{RT(content)},
+			"rich_text": splitRuns([]any{RT(content)}),
 		}}
 }
 func Mermaid(source string) Block { return Code("mermaid", source) }
@@ -141,7 +141,7 @@ func Toggle(summary string, children []Block) Block {
 	}
 	return Block{"object": "block", "type": "toggle",
 		"toggle": map[string]any{
-			"rich_text": []any{RT(summary)},
+			"rich_text": splitRuns([]any{RT(summary)}),
 			"children":  kids,
 		}}
 }
@@ -153,5 +153,5 @@ func Divider() Block {
 // Quote block. Notion allows nested rich text.
 func Quote(text string) Block {
 	return Block{"object": "block", "type": "quote",
-		"quote": map[string]any{"rich_text": []any{RT(text)}}}
+		"quote": map[string]any{"rich_text": splitRuns([]any{RT(text)})}}
 }

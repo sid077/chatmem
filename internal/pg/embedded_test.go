@@ -58,17 +58,11 @@ func TestBootstrapLockSerializesExtraction(t *testing.T) {
 		}
 	})
 
-	// The important assertion: at least one Start() must succeed AND
-	// bin/postgres must exist after both goroutines return (proves the
-	// extraction wasn't clobbered by the race — the reported bug).
-	successCount := 0
-	for _, err := range errs {
-		if err == nil {
-			successCount++
-		}
-	}
-	if successCount == 0 {
-		t.Fatalf("both Starts failed under lock: errA=%v errB=%v", errs[0], errs[1])
+	// Both Starts must succeed: the lock covers extraction + boot, so the
+	// second waits for the first instead of deleting its binaries. And
+	// bin/postgres must exist after both return.
+	if errs[0] != nil || errs[1] != nil {
+		t.Fatalf("concurrent Starts on a shared runtime: errA=%v errB=%v", errs[0], errs[1])
 	}
 	if _, err := os.Stat(filepath.Join(runtimeDir, "bin", "postgres")); err != nil {
 		t.Fatalf("bin/postgres missing after extraction — race not prevented: %v", err)
@@ -83,6 +77,49 @@ func TestBootstrapLockSerializesExtraction(t *testing.T) {
 		if e.IsDir() && (len(e.Name()) > 5 && e.Name()[:5] == "temp_") {
 			t.Fatalf("leftover extraction temp dir: %s", e.Name())
 		}
+	}
+}
+
+// TestRestartReusesExtractedBinaries guards against embedded-postgres's
+// default of wiping + re-extracting the runtime on every Start, which
+// both slowed every boot and deleted binaries from under running servers.
+func TestRestartReusesExtractedBinaries(t *testing.T) {
+	tmp := t.TempDir()
+	runtimeDir := filepath.Join(tmp, "pg-runtime")
+	pg := chatpg.New(chatpg.Config{
+		DataDir:    filepath.Join(tmp, "data"),
+		RuntimeDir: runtimeDir,
+		Port:       54343,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	if err := pg.Start(ctx); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	bin := filepath.Join(runtimeDir, "bin", "postgres")
+	before, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	pg2 := chatpg.New(chatpg.Config{
+		DataDir:    filepath.Join(tmp, "data"),
+		RuntimeDir: runtimeDir,
+		Port:       54343,
+	})
+	t.Cleanup(func() { _ = pg2.Stop() })
+	if err := pg2.Start(ctx); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	after, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("bin/postgres was re-extracted on restart (mtime %v -> %v)", before.ModTime(), after.ModTime())
 	}
 }
 

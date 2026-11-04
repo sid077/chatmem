@@ -794,6 +794,18 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 			Force:          args.Force,
 		})
 		if err != nil {
+			// A page may have been created before the failure; record it so
+			// the retry updates that page instead of creating a duplicate.
+			if res != nil && res.PageID != "" {
+				if rerr := d.Store.RecordPublishedPage(ctx, store.RecordSynthesisIn{
+					ConversationID: convID,
+					PageID:         res.PageID,
+					PageURL:        res.URL,
+					SessionType:    string(summary.SessionType),
+				}); rerr != nil {
+					return nil, synthesizeOut{}, fmt.Errorf("%w (and recording the partially written page failed: %v)", err, rerr)
+				}
+			}
 			return nil, synthesizeOut{}, err
 		}
 

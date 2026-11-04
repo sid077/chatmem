@@ -7,8 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,7 +26,6 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
-	rng     *rand.Rand
 }
 
 // NewClient constructs a client bound to the given integration token.
@@ -38,7 +38,6 @@ func NewClient(token, baseURL string) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		http:    &http.Client{Timeout: defaultHTTPTimeout},
-		rng:     rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -138,16 +137,11 @@ func (c *Client) DeleteBlock(ctx context.Context, blockID string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/blocks/"+blockID, nil, nil)
 }
 
-// AppendChildren PATCHes children onto pageID. Notion caps at 100 blocks per
-// call, so we chunk automatically.
+// AppendChildren PATCHes children onto pageID, split into batches that fit
+// Notion's per-request limits (see batchBlocks).
 func (c *Client) AppendChildren(ctx context.Context, pageID string, children []Block) error {
-	const chunk = 100
-	for start := 0; start < len(children); start += chunk {
-		end := start + chunk
-		if end > len(children) {
-			end = len(children)
-		}
-		body := map[string]any{"children": children[start:end]}
+	for _, batch := range batchBlocks(children) {
+		body := map[string]any{"children": batch}
 		if err := c.do(ctx, http.MethodPatch, "/v1/blocks/"+pageID+"/children", body, nil); err != nil {
 			return err
 		}
@@ -175,7 +169,13 @@ func (c *Client) ReplacePageBody(ctx context.Context, pageID string, newChildren
 }
 
 // do executes an authenticated JSON request against the Notion API with
-// exponential backoff on 429/5xx. Body may be nil; out may be nil (discarded).
+// exponential backoff. Body may be nil; out may be nil (discarded).
+//
+// Creating a page and appending children are not idempotent: after a
+// network error or a 5xx the request may already have been applied, and
+// retrying it duplicates the page or its blocks. Those are retried only on
+// 429, which Notion documents as "not processed"; any other failure goes
+// back to the caller, whose pending-write retry knows the page id.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	url := c.baseURL + path
 	var payload []byte
@@ -186,14 +186,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		}
 		payload = b
 	}
+	idempotent := !(method == http.MethodPost ||
+		(method == http.MethodPatch && strings.HasSuffix(path, "/children")))
 
-	var lastErr error
+	var (
+		lastErr    error
+		retryAfter time.Duration
+	)
 	for attempt := 0; attempt < maxHTTPAttempts; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<attempt) * time.Second
-			jitter := time.Duration(c.rng.Intn(500)) * time.Millisecond
+			wait := time.Duration(1<<attempt)*time.Second + time.Duration(rand.IntN(500))*time.Millisecond
+			if retryAfter > wait {
+				wait = retryAfter
+			}
 			select {
-			case <-time.After(backoff + jitter):
+			case <-time.After(wait):
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -209,6 +216,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 		resp, err := c.http.Do(req)
 		if err != nil {
+			if !idempotent {
+				return err
+			}
 			lastErr = err
 			continue
 		}
@@ -217,6 +227,10 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 
 		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("notion %s %s: HTTP %d: %s", method, path, resp.StatusCode, truncate(string(respBody), 200))
+			if resp.StatusCode != 429 && !idempotent {
+				return lastErr
+			}
+			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
 			continue
 		}
 		if resp.StatusCode >= 400 {
@@ -249,6 +263,22 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// maxRetryAfter bounds how long a single Retry-After can stall a write.
+const maxRetryAfter = 60 * time.Second
+
+// parseRetryAfter reads Notion's Retry-After header (whole seconds).
+func parseRetryAfter(v string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	d := time.Duration(n) * time.Second
+	if d > maxRetryAfter {
+		d = maxRetryAfter
+	}
+	return d
+}
+
 // Notion caps page titles at 2000 chars; be conservative for readability.
 func truncateTitle(s string) string {
 	const max = 200
@@ -256,5 +286,5 @@ func truncateTitle(s string) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	return truncateBytes(s, max-len("…")) + "…"
 }

@@ -42,8 +42,16 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
     ON chunks USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
 
-CREATE INDEX IF NOT EXISTS chunks_tsv_idx
-    ON chunks USING gin (to_tsvector('english', content));
+-- Full-text search reads a stored tsvector instead of an expression index:
+-- the old to_tsvector(content) index made every search for a common term
+-- re-parse each matching row (~60s at 200k messages), and failed inserts of
+-- messages over ~1MB ("string is too long for tsvector"). Only the first
+-- 100k characters are indexed; the full message is still stored.
+-- (v0.3.3) Drop the old index first so oversized rows can be inserted.
+DROP INDEX IF EXISTS chunks_tsv_idx;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', left(content, 100000))) STORED;
+CREATE INDEX IF NOT EXISTS chunks_tsv_col_idx ON chunks USING gin (tsv);
 
 CREATE TABLE IF NOT EXISTS events (
     seq         BIGSERIAL PRIMARY KEY,
