@@ -96,6 +96,12 @@ CREATE TABLE IF NOT EXISTS synth_facts (
 CREATE INDEX IF NOT EXISTS synth_facts_conv_idx ON synth_facts (conversation_id);
 CREATE INDEX IF NOT EXISTS synth_facts_msg_idx  ON synth_facts (message_id);
 
+-- v0.3.3: version of the content last written to the Notion page (shown in
+-- the page header). Pages published before this column existed count as v1.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_version INTEGER NOT NULL DEFAULT 0;
+UPDATE conversations SET notion_version = 1
+ WHERE notion_page_id IS NOT NULL AND notion_version = 0;
+
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_coverage_ratio  NUMERIC;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_covered_msg_ids UUID[];
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS notion_missed_msg_ids  UUID[];

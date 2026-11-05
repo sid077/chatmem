@@ -136,7 +136,7 @@ func TestLargeMessageAndSchemaMigration(t *testing.T) {
 	pg := chatpg.New(chatpg.Config{
 		DataDir:    filepath.Join(tmp, "data"),
 		RuntimeDir: filepath.Join(tmp, "runtime"),
-		Port:       54338,
+		Port:       54345,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -196,5 +196,71 @@ func TestLargeMessageAndSchemaMigration(t *testing.T) {
 	hits, err = s.SearchHistory(ctx, store.SearchHistoryIn{Query: "quokka"})
 	if err != nil || len(hits.Hits) != 1 {
 		t.Fatalf("large message not searchable: hits=%d err=%v", len(hits.Hits), err)
+	}
+}
+
+// TestCursorTiesAndForeignFacts: get_conversation's cursor must page
+// through messages that share a created_at (it used to skip them), and
+// record_facts must reject message ids from another conversation (they used
+// to mark that conversation's message as extracted).
+func TestCursorTiesAndForeignFacts(t *testing.T) {
+	tmp := t.TempDir()
+	pg := chatpg.New(chatpg.Config{
+		DataDir:    filepath.Join(tmp, "data"),
+		RuntimeDir: filepath.Join(tmp, "runtime"),
+		Port:       54346,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if err := pg.Start(ctx); err != nil {
+		t.Fatalf("start pg: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.Stop() })
+	s := store.New(pg.Pool())
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := s.RecordMessage(ctx, store.RecordMessageIn{Role: "user", Content: "conv A", Model: "m", Provider: "p", ClientID: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pg.Pool().Exec(ctx,
+		`INSERT INTO messages (conversation_id, role, content, created_at)
+		 SELECT $1, 'user', 'tie ' || g, '2030-01-01T00:00:00Z' FROM generate_series(1, 7) g`, a.ConversationID); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[uuid.UUID]bool{}
+	in := store.GetConversationIn{ConversationID: a.ConversationID, Limit: 3}
+	for page := 0; page < 10; page++ {
+		out, err := s.GetConversation(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range out.Messages {
+			if seen[m.ID] {
+				t.Fatalf("message %s returned twice", m.ID)
+			}
+			seen[m.ID] = true
+		}
+		if out.NextAfter == nil {
+			break
+		}
+		in.After, in.AfterSeq = *out.NextAfter, out.NextAfterSeq
+	}
+	if len(seen) != 8 {
+		t.Fatalf("paged %d of 8 messages (equal timestamps skipped?)", len(seen))
+	}
+
+	b, err := s.RecordMessage(ctx, store.RecordMessageIn{Role: "user", Content: "conv B", Model: "m", Provider: "p", ClientID: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.RecordFacts(ctx, a.ConversationID, []store.FactIn{{MessageID: b.MessageID, Category: "concept", Text: "x"}})
+	if err == nil || !strings.Contains(err.Error(), "not in conversation") {
+		t.Fatalf("fact for another conversation's message: want rejection, got %v", err)
+	}
+	if un, _ := s.UnextractedMessages(ctx, b.ConversationID, 10); len(un) != 1 {
+		t.Fatalf("conversation B's message wrongly marked extracted (%d unextracted)", len(un))
 	}
 }

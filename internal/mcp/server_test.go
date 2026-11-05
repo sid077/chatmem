@@ -480,6 +480,36 @@ func TestMultiPassCoverageGate(t *testing.T) {
 		t.Fatalf("expected error to list missed uuid %s in coverage message; got:\n%s", msgIDs[3], txt)
 	}
 
+	// The gated LLM must not be able to lower the bar itself.
+	bypass, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "synthesize_to_notion",
+		Arguments: map[string]any{
+			"conversation_id": convID,
+			"summary":         underCovered,
+			"min_coverage":    0.1,
+		},
+	})
+	if err != nil || !bypass.IsError {
+		t.Fatalf("min_coverage=0.1 bypassed the coverage gate: err=%v %s", err, firstText(bypass.Content))
+	}
+
+	// Facts may only reference this conversation's messages.
+	foreign, err := session.CallTool(ctx, &sdk.CallToolParams{
+		Name: "record_facts",
+		Arguments: map[string]any{
+			"conversation_id": convID,
+			"facts": []map[string]any{
+				{"message_id": "33333333-3333-3333-3333-333333333333", "category": "concept", "text": "x"},
+			},
+		},
+	})
+	if err == nil && (foreign == nil || !foreign.IsError) {
+		t.Fatal("record_facts accepted a message id from outside the conversation")
+	}
+	if err == nil && !strings.Contains(firstText(foreign.Content), "not in conversation") {
+		t.Fatalf("unhelpful record_facts error: %s", firstText(foreign.Content))
+	}
+
 	// Retry with full coverage.
 	full := underCovered
 	full["concepts"] = []map[string]any{{
@@ -501,12 +531,45 @@ func TestMultiPassCoverageGate(t *testing.T) {
 	if call2.IsError {
 		t.Fatalf("expected success at 100%% coverage: %s", firstText(call2.Content))
 	}
-	var okOut struct {
+	type synthOut struct {
 		NotionURL string  `json:"notion_url"`
 		Coverage  float64 `json:"coverage"`
+		Version   int     `json:"version"`
+		Skipped   bool    `json:"skipped"`
 	}
+	var okOut synthOut
 	_ = remarshal(call2.StructuredContent, &okOut)
-	if okOut.NotionURL == "" || okOut.Coverage < 0.99 {
+	if okOut.NotionURL == "" || okOut.Coverage < 0.99 || okOut.Version != 1 {
 		t.Fatalf("bad structured out: %+v", okOut)
+	}
+
+	// Each re-synthesis with new content bumps the page version (it used to
+	// be stuck at 2); an unchanged summary keeps its version and its URL.
+	synth := func(title string) synthOut {
+		t.Helper()
+		full["title"] = title
+		c, err := session.CallTool(ctx, &sdk.CallToolParams{
+			Name:      "synthesize_to_notion",
+			Arguments: map[string]any{"conversation_id": convID, "summary": full},
+		})
+		if err != nil || c.IsError {
+			t.Fatalf("re-synth %q: %v %s", title, err, firstText(c.Content))
+		}
+		var o synthOut
+		_ = remarshal(c.StructuredContent, &o)
+		return o
+	}
+	if o := synth("HNSW notes v2"); o.Version != 2 || o.Skipped {
+		t.Fatalf("second write: want version 2, got %+v", o)
+	}
+	if o := synth("HNSW notes v3"); o.Version != 3 {
+		t.Fatalf("third write: want version 3, got %+v", o)
+	}
+	if o := synth("HNSW notes v3"); !o.Skipped || o.Version != 3 || o.NotionURL == "" {
+		t.Fatalf("unchanged summary: want skipped at version 3 with URL kept, got %+v", o)
+	}
+	pages, err := st.ListNotionPages(ctx, 10)
+	if err != nil || len(pages) != 1 || pages[0].URL == "" {
+		t.Fatalf("page URL lost after skipped synth: %+v err=%v", pages, err)
 	}
 }

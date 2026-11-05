@@ -134,13 +134,13 @@
     },
     {
       "name": "get_conversation",
-      "description": "Fetch a conversation and its messages, ordered by creation time. Cursor-paginated via the after timestamp.",
+      "description": "Fetch a conversation and its messages, ordered by creation time. Cursor-paginated: pass next_after back as after.",
       "inputSchema": {
         "type": "object",
         "properties": {
           "conversation_id": { "type": "string", "description": "UUID of the conversation" },
           "limit":           { "type": "integer", "description": "max messages to return (default 100, max 500)" },
-          "after":           { "type": "string", "description": "RFC3339 timestamp cursor; return messages strictly after this" }
+          "after":           { "type": "string", "description": "cursor: pass next_after from the previous page verbatim, or an RFC3339 timestamp to return messages strictly after it" }
         },
         "required": ["conversation_id"]
       },
@@ -161,7 +161,7 @@
     },
     {
       "name": "record_facts",
-      "description": "Phase 1 write. Bulk-store atomic facts extracted from a chunk. Returns how many messages remain unextracted.",
+      "description": "Phase 1 write. Bulk-store atomic facts extracted from a chunk. Every message_id must belong to conversation_id. Returns how many messages remain unextracted.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -202,7 +202,8 @@
         "properties": {
           "conversation_id": { "type": "string", "description": "UUID of the conversation" },
           "summary":         { "type": "object", "description": "structured Summary object matching the schema in get_synthesis_prompt" },
-          "force":           { "type": "boolean", "description": "rewrite the Notion page even if the summary hash is unchanged" }
+          "force":           { "type": "boolean", "description": "rewrite the Notion page even if the summary hash is unchanged" },
+          "min_coverage":    { "type": "number", "description": "raise the fraction of messages-with-facts that must be cited above the default 0.95 (lower values are ignored)" }
         },
         "required": ["conversation_id", "summary"]
       },

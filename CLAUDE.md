@@ -75,6 +75,9 @@ The pgvector version skew between darwin (0.8.5) and linux (0.8.3) is intentiona
 35. **Full-text search reads the stored `chunks.tsv` column (GIN `chunks_tsv_col_idx`), never `to_tsvector(content)` at query time.** The generated column indexes `left(content, 100000)` so inserts can never hit Postgres's 1 MB tsvector limit. The old expression index `chunks_tsv_idx` is dropped by `schema.sql`; do not reintroduce it — it broke inserts of messages over ~1 MB and made common-term searches re-parse every matching row (~60 s at 200k messages vs ~2 s now). `SearchHistory` ranks ids in a CTE and reads chunk content only for the top `TopK*3` rows.
 36. **`store.EnsureSchema` runs in one transaction under `pg_advisory_xact_lock(schemaLockKey)`.** Several processes routinely apply the schema to one Postgres at once, and `CREATE EXTENSION` / `CREATE TABLE … IF NOT EXISTS` are not concurrency-safe (the loser gets a unique violation and its `chatmem mcp` exits). Keep schema.sql transactional — no `CREATE INDEX CONCURRENTLY`.
 37. **`pg.Embedded.Start` stops the server on any failure after booting it** (pool connect, ping, version stamp, pgvector install). Otherwise a cancelled or failed start leaves an orphaned postgres that nothing owns.
+38. **Messages are ordered by `(created_at, seq)` everywhere, and `get_conversation` pages with a `(created_at, seq)` keyset cursor** encoded as `<RFC3339Nano>|<seq>` (`formatCursor` / `parseCursor` in `internal/mcp/server.go`). `created_at` alone skipped messages sharing a timestamp at a page boundary. A bare RFC3339 `after` still means "strictly after that time". Never order messages by `created_at` alone.
+39. **The coverage gate can only be tightened by the caller.** `min_coverage` below `defaultMinCoverage` (0.95) is ignored — the LLM calling `synthesize_to_notion` is the one being gated. `record_facts` rejects message ids outside its conversation (they used to mark another conversation's message as extracted).
+40. **`conversations.notion_version` is the version last rendered on the Notion page.** The handler renders `notion_version + 1`, stores it with `GREATEST(notion_version, $v)` (also from partial creates and drained retries via `SynthesizeOut.Version`), and leaves it unchanged when the write is skipped as unchanged. A skipped write must still return the page URL — `RecordSynthesis` overwrites `notion_page_url`.
 
 ## Platform support matrix
 
@@ -102,9 +105,10 @@ To add a platform:
 | `54335` | `internal/mcp` tests |
 | `54336` | `cmd/chatmem` e2e test |
 | `54337` | Ad-hoc store perf probes |
-| `54338` | `internal/store` large-message + migration test |
+| `54338–54339` | `internal/mcp` synthesize + coverage-gate tests |
 | `54340–54343` | `internal/pg` tests |
 | `54344` | `cmd/chatmem` supervisor test |
+| `54345–54346` | `internal/store` migration + cursor/foreign-fact tests |
 | `54350–54379` | Ad-hoc MCP smoke tests (sandboxed `CHATMEM_HOME`) |
 
 Running any real `chatmem daemon/mcp` on the default port will collide with subsequent commands using the same port. Use `--port` overrides in dev.
