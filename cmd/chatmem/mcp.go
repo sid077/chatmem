@@ -173,6 +173,7 @@ func publishHook(st *store.Store) notion.PublishHook {
 			PageURL:        out.URL,
 			SessionType:    string(sessionType),
 			SummaryHash:    out.SummaryHash,
+			Version:        out.Version,
 		})
 	}
 }

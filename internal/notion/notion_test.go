@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -436,5 +438,35 @@ func TestConfig_LoadSaveRoundtrip(t *testing.T) {
 	if got == nil || got.IntegrationToken != "secret" ||
 		got.AutoSynthesize.IdleMinutes != 5 {
 		t.Fatalf("round trip mismatch: %+v", got)
+	}
+}
+
+// TestConfig_AutoSynthesizeDefaults: defaults fill only the auto_synthesize
+// fields a hand-written notion.json leaves out. An explicit "enabled": false
+// used to be reset to true whenever the thresholds were absent.
+func TestConfig_AutoSynthesizeDefaults(t *testing.T) {
+	def := notion.DefaultAuto()
+	for name, tc := range map[string]struct {
+		json string
+		want notion.AutoSynthesizeCfg
+	}{
+		"disabled only":    {`{"auto_synthesize":{"enabled":false}}`, notion.AutoSynthesizeCfg{Enabled: false, IdleMinutes: def.IdleMinutes, MessageThreshold: def.MessageThreshold, MinMessages: def.MinMessages}},
+		"block missing":    {`{}`, def},
+		"custom threshold": {`{"auto_synthesize":{"message_threshold":50}}`, notion.AutoSynthesizeCfg{Enabled: true, IdleMinutes: def.IdleMinutes, MessageThreshold: 50, MinMessages: def.MinMessages}},
+		"zero threshold":   {`{"auto_synthesize":{"enabled":true,"message_threshold":0}}`, def},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "notion.json"), []byte(tc.json), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := notion.LoadConfig(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.AutoSynthesize != tc.want {
+				t.Fatalf("got %+v, want %+v", c.AutoSynthesize, tc.want)
+			}
+		})
 	}
 }

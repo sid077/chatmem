@@ -63,6 +63,7 @@ type SynthesizeOut struct {
 	URL         string
 	SummaryHash string
 	Skipped     bool // true when hash matched and we didn't touch Notion
+	Version     int  // in.Meta.Version, i.e. the version rendered on the page
 }
 
 // Synthesize is the single entry point. Validates the Summary, renders it
@@ -77,7 +78,7 @@ func (w *Writer) Synthesize(ctx context.Context, in SynthesizeIn) (*SynthesizeOu
 	hash := in.Summary.Hash()
 	if !in.Force && in.ExistingPageID != "" && hash == in.PreviousHash {
 		w.clearPending(in.Meta.ConversationID)
-		return &SynthesizeOut{PageID: in.ExistingPageID, SummaryHash: hash, Skipped: true}, nil
+		return &SynthesizeOut{PageID: in.ExistingPageID, URL: pageURL(in.ExistingPageID), SummaryHash: hash, Skipped: true, Version: in.Meta.Version}, nil
 	}
 
 	blocks := Render(in.Summary, in.Meta, in.Transcript)
@@ -107,7 +108,7 @@ func (w *Writer) Synthesize(ctx context.Context, in SynthesizeIn) (*SynthesizeOu
 		if rest := blocks[len(first):]; len(rest) > 0 {
 			if err := w.client.AppendChildren(ctx, pageID, rest); err != nil {
 				w.persistPending(in, hash)
-				return &SynthesizeOut{PageID: pageID, URL: url}, fmt.Errorf("notion append remainder: %w", err)
+				return &SynthesizeOut{PageID: pageID, URL: url, Version: in.Meta.Version}, fmt.Errorf("notion append remainder: %w", err)
 			}
 		}
 	} else {
@@ -129,6 +130,7 @@ func (w *Writer) Synthesize(ctx context.Context, in SynthesizeIn) (*SynthesizeOu
 		PageID:      pageID,
 		URL:         url,
 		SummaryHash: hash,
+		Version:     in.Meta.Version,
 	}, nil
 }
 

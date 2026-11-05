@@ -197,13 +197,13 @@ Structured (`StructuredContent`):
 
 ### `get_conversation`
 
-Fetch a conversation and its messages, ordered by `created_at` ascending. Cursor-paginated via `after`.
+Fetch a conversation and its messages, ordered by `created_at` ascending (insertion order breaks ties). Cursor-paginated: pass the returned `next_after` back as `after`.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `conversation_id` | UUID string | yes | |
 | `limit` | int | no | Default 100, max 500 |
-| `after` | RFC3339 string | no | Return messages strictly after this timestamp |
+| `after` | string | no | `next_after` from the previous page (`<RFC3339>\|<seq>`), or a plain RFC3339 timestamp to return messages strictly after it |
 
 Returns both a rendered text block and a structured payload.
 
@@ -276,6 +276,10 @@ suggest_synthesize=true triggers the client-side LLM to run:
    ```
 
 Restart your MCP client (Windsurf/Cursor/Claude Code). Auto-synthesis fires when a conversation crosses 20 messages, or the client-side rule triggers on `suggest_synthesize=true` in `record_message` responses.
+
+To turn auto-synthesis off, set `"auto_synthesize": {"enabled": false}` in `~/.local/share/chatmem/notion.json`. Fields you leave out of `auto_synthesize` take their defaults (`idle_minutes` 10, `message_threshold` 20, `min_messages` 4).
+
+The coverage gate requires 95% of messages with non-trivial facts to be cited. `synthesize_to_notion`'s `min_coverage` can raise that bar but not lower it. `record_facts` rejects message ids that aren't in the conversation. Each re-synthesis that changes the page bumps the version shown in the page header.
 
 ### System-prompt rule for your MCP client
 
@@ -583,7 +587,7 @@ go test ./internal/mcp -count=1 -v
 go test ./cmd/chatmem -run TestBinaryStdioMCP -count=1 -v
 ```
 
-Tests use distinct hard-coded ports (`54334`–`54338`, `54340`–`54343`) — run one test package at a time if you have a real chatmem daemon running on `54329`.
+Tests use distinct hard-coded ports (`54334`–`54346`) — run one test package at a time if you have a real chatmem daemon running on `54329`.
 
 ## Development workflow
 

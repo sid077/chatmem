@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,7 +151,7 @@ func registerRecordMessage(s *sdk.Server, d Deps) {
 type getConversationArgs struct {
 	ConversationID string `json:"conversation_id" jsonschema:"UUID of the conversation"`
 	Limit          int    `json:"limit,omitempty" jsonschema:"max messages to return (default 100, max 500)"`
-	After          string `json:"after,omitempty" jsonschema:"RFC3339 timestamp cursor; return messages strictly after this"`
+	After          string `json:"after,omitempty" jsonschema:"cursor: pass next_after from the previous page verbatim, or an RFC3339 timestamp to return messages strictly after it"`
 }
 
 type conversationDTO struct {
@@ -308,19 +309,16 @@ func registerGetConversation(s *sdk.Server, st *store.Store, agg *telemetry.Aggr
 			recordErr()
 			return nil, getConversationOut{}, fmt.Errorf("invalid conversation_id: %w", err)
 		}
-		var after time.Time
-		if args.After != "" {
-			t, err := time.Parse(time.RFC3339Nano, args.After)
-			if err != nil {
-				recordErr()
-				return nil, getConversationOut{}, fmt.Errorf("invalid after: %w", err)
-			}
-			after = t
+		after, afterSeq, err := parseCursor(args.After)
+		if err != nil {
+			recordErr()
+			return nil, getConversationOut{}, err
 		}
 
 		res, err := st.GetConversation(ctx, store.GetConversationIn{
 			ConversationID: convID,
 			After:          after,
+			AfterSeq:       afterSeq,
 			Limit:          args.Limit,
 		})
 		if err != nil {
@@ -353,7 +351,7 @@ func registerGetConversation(s *sdk.Server, st *store.Store, agg *telemetry.Aggr
 			})
 		}
 		if res.NextAfter != nil {
-			s := res.NextAfter.Format(time.RFC3339Nano)
+			s := formatCursor(*res.NextAfter, res.NextAfterSeq)
 			out.NextAfter = &s
 		}
 
@@ -361,6 +359,33 @@ func registerGetConversation(s *sdk.Server, st *store.Store, agg *telemetry.Aggr
 			Content: []sdk.Content{&sdk.TextContent{Text: renderConversation(out)}},
 		}, out, nil
 	})
+}
+
+// get_conversation cursors are "<RFC3339Nano>|<seq>": the timestamp alone
+// can't page through messages that share a created_at.
+func formatCursor(t time.Time, seq int64) string {
+	return t.UTC().Format(time.RFC3339Nano) + "|" + strconv.FormatInt(seq, 10)
+}
+
+// parseCursor accepts next_after verbatim, or a bare RFC3339 timestamp
+// (seq 0 = strictly after that time).
+func parseCursor(c string) (time.Time, int64, error) {
+	if c == "" {
+		return time.Time{}, 0, nil
+	}
+	ts, seqStr, hasSeq := strings.Cut(c, "|")
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return time.Time{}, 0, fmt.Errorf("invalid after: %w", err)
+	}
+	if !hasSeq {
+		return t, 0, nil
+	}
+	seq, err := strconv.ParseInt(seqStr, 10, 64)
+	if err != nil || seq <= 0 {
+		return time.Time{}, 0, fmt.Errorf("invalid after: bad sequence %q", seqStr)
+	}
+	return t, seq, nil
 }
 
 func renderConversation(out getConversationOut) string {
@@ -643,7 +668,7 @@ type synthesizeArgs struct {
 	ConversationID string         `json:"conversation_id" jsonschema:"UUID of the conversation"`
 	Summary        notion.Summary `json:"summary" jsonschema:"structured Summary object matching the schema in get_synthesis_prompt"`
 	Force          bool           `json:"force,omitempty" jsonschema:"true = rewrite the Notion page even if the summary hash is unchanged"`
-	MinCoverage    float64        `json:"min_coverage,omitempty" jsonschema:"require this fraction of messages-with-facts to be cited (default 0.95)"`
+	MinCoverage    float64        `json:"min_coverage,omitempty" jsonschema:"raise the fraction of messages-with-facts that must be cited above the default 0.95 (lower values are ignored)"`
 }
 
 type synthesizeOut struct {
@@ -737,9 +762,14 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 		// appear in at least one Summary section's cited_from. Below the
 		// threshold → refuse the write and return the missed msg ids so
 		// the LLM can extend the Summary and retry.
-		minCov := args.MinCoverage
-		if minCov <= 0 {
-			minCov = defaultMinCoverage
+		// min_coverage can only raise the bar: the caller is the LLM being
+		// gated, so a lower value would let it opt out of the check.
+		minCov := defaultMinCoverage
+		if args.MinCoverage > minCov {
+			minCov = args.MinCoverage
+		}
+		if minCov > 1 {
+			minCov = 1
 		}
 		cited := collectCitedUUIDs(&summary)
 		report, err := d.Store.MessageCoverage(ctx, convID, cited)
@@ -776,10 +806,7 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 			})
 		}
 
-		version := 1
-		if sc.NotionPageID != "" {
-			version = sc.SynthesizedVersion + 1
-		}
+		version := sc.SynthesizedVersion + 1
 		res, err := d.NotionWriter.Synthesize(ctx, notion.SynthesizeIn{
 			Summary: summary,
 			Meta: notion.RenderMeta{
@@ -802,6 +829,7 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 					PageID:         res.PageID,
 					PageURL:        res.URL,
 					SessionType:    string(summary.SessionType),
+					Version:        version,
 				}); rerr != nil {
 					return nil, synthesizeOut{}, fmt.Errorf("%w (and recording the partially written page failed: %v)", err, rerr)
 				}
@@ -809,6 +837,9 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 			return nil, synthesizeOut{}, err
 		}
 
+		if res.Skipped {
+			version = sc.SynthesizedVersion // page content unchanged
+		}
 		// Persist the resulting page identity + reset the synth counter.
 		if err := d.Store.RecordSynthesis(ctx, store.RecordSynthesisIn{
 			ConversationID: convID,
@@ -816,6 +847,7 @@ func registerSynthesizeToNotion(s *sdk.Server, d Deps) {
 			PageURL:        res.URL,
 			SessionType:    string(summary.SessionType),
 			SummaryHash:    res.SummaryHash,
+			Version:        version,
 		}); err != nil {
 			return nil, synthesizeOut{}, fmt.Errorf("notion page written, but failed to persist state locally: %w", err)
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -49,14 +50,40 @@ func LoadConfig(dataHome string) (*Config, error) {
 		return nil, err
 	}
 	defer f.Close()
+	raw, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
 	var c Config
-	if err := json.NewDecoder(f).Decode(&c); err != nil {
+	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, fmt.Errorf("parse notion config: %w", err)
 	}
-	// Fill in defaults for zero-value auto config so users upgrading don't
-	// silently lose auto-fire when we later add fields.
-	if c.AutoSynthesize.IdleMinutes == 0 && c.AutoSynthesize.MessageThreshold == 0 {
-		c.AutoSynthesize = DefaultAuto()
+	// Fill in defaults only for auto_synthesize fields the file leaves out,
+	// so configs from before a field existed keep working. An explicit
+	// "enabled": false must survive — it used to be reset to true whenever
+	// the thresholds were absent.
+	var present struct {
+		Auto *struct {
+			Enabled          *bool `json:"enabled"`
+			IdleMinutes      *int  `json:"idle_minutes"`
+			MessageThreshold *int  `json:"message_threshold"`
+			MinMessages      *int  `json:"min_messages"`
+		} `json:"auto_synthesize"`
+	}
+	_ = json.Unmarshal(raw, &present)
+	def, a := DefaultAuto(), &c.AutoSynthesize
+	p := present.Auto
+	if p == nil || p.Enabled == nil {
+		a.Enabled = def.Enabled
+	}
+	if p == nil || p.IdleMinutes == nil || a.IdleMinutes <= 0 {
+		a.IdleMinutes = def.IdleMinutes
+	}
+	if p == nil || p.MessageThreshold == nil || a.MessageThreshold <= 0 {
+		a.MessageThreshold = def.MessageThreshold
+	}
+	if p == nil || p.MinMessages == nil || a.MinMessages <= 0 {
+		a.MinMessages = def.MinMessages
 	}
 	return &c, nil
 }

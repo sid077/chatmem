@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -145,6 +146,7 @@ type RecordSynthesisIn struct {
 	PageURL        string
 	SessionType    string
 	SummaryHash    string
+	Version        int // version number rendered on the page; stored as max(current, Version)
 }
 
 func (s *Store) RecordSynthesis(ctx context.Context, in RecordSynthesisIn) error {
@@ -155,9 +157,10 @@ func (s *Store) RecordSynthesis(ctx context.Context, in RecordSynthesisIn) error
 		       notion_session_type = $4,
 		       notion_summary_hash = $5,
 		       notion_synthesized_at = now(),
+		       notion_version = GREATEST(notion_version, $6),
 		       messages_since_last_synth = 0
 		 WHERE id = $1`,
-		in.ConversationID, in.PageID, in.PageURL, in.SessionType, in.SummaryHash)
+		in.ConversationID, in.PageID, in.PageURL, in.SessionType, in.SummaryHash, in.Version)
 	if err != nil {
 		return fmt.Errorf("update synth state: %w", err)
 	}
@@ -176,9 +179,10 @@ func (s *Store) RecordPublishedPage(ctx context.Context, in RecordSynthesisIn) e
 		       notion_page_url = $3,
 		       notion_session_type = $4,
 		       notion_summary_hash = $5,
-		       notion_synthesized_at = now()
+		       notion_synthesized_at = now(),
+		       notion_version = GREATEST(notion_version, $6)
 		 WHERE id = $1`,
-		in.ConversationID, in.PageID, in.PageURL, in.SessionType, in.SummaryHash)
+		in.ConversationID, in.PageID, in.PageURL, in.SessionType, in.SummaryHash, in.Version)
 	if err != nil {
 		return fmt.Errorf("record published page: %w", err)
 	}
@@ -236,7 +240,7 @@ type SynthContext struct {
 	ClientID           string
 	NotionPageID       string
 	NotionSummaryHash  string
-	SynthesizedVersion int // number of successful past synths; 0 = never
+	SynthesizedVersion int // version last written to the Notion page; 0 = never
 	Messages           []Message
 }
 
@@ -248,13 +252,12 @@ func (s *Store) GetSynthContext(ctx context.Context, convID uuid.UUID) (SynthCon
 	out.ConversationID = convID
 
 	var pageID, hash *string
-	var synthedAt *time.Time
 	if err := s.pool.QueryRow(ctx,
 		`SELECT model, provider, client_id,
-		        notion_page_id, notion_summary_hash, notion_synthesized_at
+		        notion_page_id, notion_summary_hash, notion_version
 		 FROM conversations WHERE id = $1`, convID).
 		Scan(&out.Model, &out.Provider, &out.ClientID,
-			&pageID, &hash, &synthedAt); err != nil {
+			&pageID, &hash, &out.SynthesizedVersion); err != nil {
 		return SynthContext{}, fmt.Errorf("load conv metadata: %w", err)
 	}
 	if pageID != nil {
@@ -263,22 +266,19 @@ func (s *Store) GetSynthContext(ctx context.Context, convID uuid.UUID) (SynthCon
 	if hash != nil {
 		out.NotionSummaryHash = *hash
 	}
-	if synthedAt != nil {
-		out.SynthesizedVersion = 1 // count is fine as "at least once"; the callers only need version+1
-	}
 
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, role, content, tool_calls, token_count, created_at
+		`SELECT id, role, content, tool_calls, token_count, created_at, seq
 		 FROM messages
 		 WHERE conversation_id = $1
-		 ORDER BY created_at ASC`, convID)
+		 ORDER BY created_at, seq`, convID)
 	if err != nil {
 		return SynthContext{}, fmt.Errorf("load messages: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Seq); err != nil {
 			return SynthContext{}, err
 		}
 		out.Messages = append(out.Messages, m)
@@ -319,10 +319,48 @@ func (s *Store) RecordFacts(ctx context.Context, convID uuid.UUID, in []FactIn) 
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	// Every fact must point at a message of THIS conversation. A fact filed
+	// against another conversation's message would mark that message as
+	// extracted there and inflate this conversation's inventory.
+	ids := make([]uuid.UUID, 0, len(in))
 	for i, f := range in {
 		if f.MessageID == uuid.Nil || f.Category == "" || strings.TrimSpace(f.Text) == "" {
 			return fmt.Errorf("facts[%d]: message_id, category, text are required", i)
 		}
+		ids = append(ids, f.MessageID)
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT id FROM messages WHERE conversation_id = $1 AND id = ANY($2)`, convID, ids)
+	if err != nil {
+		return fmt.Errorf("check fact message ids: %w", err)
+	}
+	known := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		known[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	var bad []string
+	seen := map[uuid.UUID]bool{}
+	for _, id := range ids {
+		if !known[id] && !seen[id] {
+			seen[id] = true
+			bad = append(bad, id.String())
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("message_id(s) not in conversation %s: %s — use the uuids shown in get_extraction_prompt", convID, strings.Join(bad, ", "))
+	}
+
+	for i, f := range in {
 		imp := f.Importance
 		if imp == "" {
 			imp = "normal"
@@ -345,7 +383,7 @@ func (s *Store) GetFacts(ctx context.Context, convID uuid.UUID) ([]Fact, error) 
 		 FROM synth_facts f
 		 JOIN messages m ON m.id = f.message_id
 		 WHERE f.conversation_id = $1
-		 ORDER BY m.created_at ASC, f.created_at ASC`, convID)
+		 ORDER BY m.created_at, m.seq, f.created_at`, convID)
 	if err != nil {
 		return nil, err
 	}
@@ -368,11 +406,11 @@ func (s *Store) UnextractedMessages(ctx context.Context, convID uuid.UUID, limit
 		limit = 40
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT m.id, m.role, m.content, m.tool_calls, m.token_count, m.created_at
+		`SELECT m.id, m.role, m.content, m.tool_calls, m.token_count, m.created_at, m.seq
 		 FROM messages m
 		 WHERE m.conversation_id = $1
 		   AND NOT EXISTS (SELECT 1 FROM synth_facts f WHERE f.message_id = m.id)
-		 ORDER BY m.created_at ASC
+		 ORDER BY m.created_at, m.seq
 		 LIMIT $2`, convID, limit)
 	if err != nil {
 		return nil, err
@@ -381,7 +419,7 @@ func (s *Store) UnextractedMessages(ctx context.Context, convID uuid.UUID, limit
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Seq); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -562,18 +600,24 @@ type Message struct {
 	ToolCalls  []byte
 	TokenCount int
 	CreatedAt  time.Time
+	Seq        int64 // insertion order; breaks created_at ties
 }
 
 type GetConversationIn struct {
 	ConversationID uuid.UUID
-	After          time.Time
-	Limit          int
+	// After/AfterSeq form a keyset cursor: messages strictly after
+	// (After, AfterSeq) in (created_at, seq) order. AfterSeq == 0 means a
+	// bare timestamp: only messages with created_at > After.
+	After    time.Time
+	AfterSeq int64
+	Limit    int
 }
 
 type GetConversationOut struct {
 	Conversation Conversation
 	Messages     []Message
 	NextAfter    *time.Time
+	NextAfterSeq int64
 }
 
 type SearchHit struct {
@@ -708,13 +752,20 @@ func (s *Store) GetConversation(ctx context.Context, in GetConversationIn) (GetC
 		return GetConversationOut{}, fmt.Errorf("load conversation: %w", err)
 	}
 
+	// A bare timestamp cursor keeps its "strictly after" meaning by using
+	// the largest seq as the tiebreak bound.
+	afterSeq := in.AfterSeq
+	if afterSeq <= 0 {
+		afterSeq = math.MaxInt64
+	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, role, content, tool_calls, token_count, created_at
+		`SELECT id, role, content, tool_calls, token_count, created_at, seq
 		 FROM messages
-		 WHERE conversation_id = $1 AND created_at > $2
-		 ORDER BY created_at ASC
-		 LIMIT $3`,
-		in.ConversationID, in.After, in.Limit+1)
+		 WHERE conversation_id = $1
+		   AND (created_at > $2 OR (created_at = $2 AND seq > $3))
+		 ORDER BY created_at, seq
+		 LIMIT $4`,
+		in.ConversationID, in.After, afterSeq, in.Limit+1)
 	if err != nil {
 		return GetConversationOut{}, fmt.Errorf("load messages: %w", err)
 	}
@@ -723,7 +774,7 @@ func (s *Store) GetConversation(ctx context.Context, in GetConversationIn) (GetC
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Role, &m.Content, &m.ToolCalls, &m.TokenCount, &m.CreatedAt, &m.Seq); err != nil {
 			return GetConversationOut{}, err
 		}
 		msgs = append(msgs, m)
@@ -735,8 +786,9 @@ func (s *Store) GetConversation(ctx context.Context, in GetConversationIn) (GetC
 	out := GetConversationOut{Conversation: conv, Messages: msgs}
 	if len(msgs) > in.Limit {
 		out.Messages = msgs[:in.Limit]
-		next := out.Messages[len(out.Messages)-1].CreatedAt
-		out.NextAfter = &next
+		last := out.Messages[len(out.Messages)-1]
+		out.NextAfter = &last.CreatedAt
+		out.NextAfterSeq = last.Seq
 	}
 	return out, nil
 }
